@@ -65,7 +65,6 @@
     color: inherit; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
   }
   #ui button:hover { background: rgba(255,255,255,.22); }
-  #hint { opacity: .75; margin-left: 6px; }
   @media (max-width: 640px) {
     #ui {
       left: max(10px, env(safe-area-inset-left));
@@ -75,7 +74,6 @@
       justify-content: center;
     }
     #ui button { padding: 8px 10px; flex: 1 1 auto; }
-    #hint { flex-basis: 100%; margin: 2px 0 0; text-align: center; font-size: 12px; }
   }
 </style>
 </head>
@@ -87,7 +85,6 @@
   <button id="btn-scatter">Scatter</button>
   <button id="btn-flipall">Flip all</button>
   <button id="btn-deal">Deal 5</button>
-  <span id="hint">Pull to slide &middot; push an edge inward to lift and flip &middot; let go mid-lift to throw &middot; tap to flip it away from you</span>
 </div>
 
 <script>

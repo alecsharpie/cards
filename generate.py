@@ -15,7 +15,7 @@ from pathlib import Path
 W, H = 250, 350          # poker size ratio 2.5 : 3.5
 RADIUS = 16
 MARGIN = 12              # inner border inset
-PIP = 46                 # size of a normal pip
+PIP = 43                 # size of a normal pip
 CORNER_PIP = 22
 BIG_PIP = 130            # ace centre pip
 
@@ -38,10 +38,10 @@ RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
 # Suit glyphs drawn inside a 100x100 box, centred on (50, 50).
 SUIT_PATHS = {
     "hearts": (
-        "M50,92 C22,68 6,52 6,32 C6,17 18,6 32,6 C41,6 47,11 50,19 "
-        "C53,11 59,6 68,6 C82,6 94,17 94,32 C94,52 78,68 50,92 Z"
+        "M50,94 C22,70 6,53 6,32 C6,16 18,5 32,5 C41,5 48,11 50,21 "
+        "C52,11 59,5 68,5 C82,5 94,16 94,32 C94,53 78,70 50,94 Z"
     ),
-    "diamonds": "M50,4 L92,50 L50,96 L8,50 Z",
+    "diamonds": "M50,3 L86,50 L50,97 L14,50 Z",
     "spades": (
         "M50,6 C78,32 94,46 94,63 C94,77 84,87 71,87 C63,87 56,83 52,77 "
         "C53,86 58,92 66,96 L34,96 C42,92 47,86 48,77 C44,83 37,87 29,87 "
@@ -51,7 +51,7 @@ SUIT_PATHS = {
         "M50,7 A19,19 0 1 1 49.9,7 Z "
         "M28,50 A19,19 0 1 1 27.9,50 Z "
         "M72,50 A19,19 0 1 1 71.9,50 Z "
-        "M50,52 C52,74 57,88 66,96 L34,96 C43,88 48,74 50,52 Z"
+        "M50,50 C53,74 58,89 68,96 L32,96 C42,89 47,74 50,50 Z"
     ),
 }
 
@@ -160,58 +160,68 @@ def ace_card(suit: str, color: str) -> str:
 
 
 def crown(color: str, kind: str) -> str:
-    """Simple crown shapes drawn in a 100x60 box, origin top-left."""
+    """Court emblems drawn in a 100x60 box, origin top-left."""
     if kind == "K":
-        path = ("M8,56 L8,22 L28,38 L50,6 L72,38 L92,22 L92,56 Z "
-                "M8,56 L92,56 L92,48 L8,48 Z")
-        gems = ('<circle cx="50" cy="6" r="4"/><circle cx="8" cy="22" r="4"/>'
-                '<circle cx="92" cy="22" r="4"/>')
-    elif kind == "Q":
-        path = ("M10,56 L10,26 C22,26 30,34 34,44 C36,20 44,10 50,8 "
-                "C56,10 64,20 66,44 C70,34 78,26 90,26 L90,56 Z "
-                "M10,56 L90,56 L90,48 L10,48 Z")
-        gems = ('<circle cx="50" cy="8" r="4.5"/><circle cx="10" cy="26" r="4"/>'
-                '<circle cx="90" cy="26" r="4"/>')
-    else:  # Jack: a cap with a feather
-        path = ("M14,52 C14,30 30,16 50,16 C70,16 86,30 86,52 Z "
-                "M8,52 L92,52 L92,58 L8,58 Z "
-                "M62,20 C70,4 84,0 96,4 C88,10 82,18 76,26 Z")
-        gems = '<circle cx="50" cy="16" r="3.5"/>'
-    return f'<g fill="{color}">{path and f"<path d=\"{path}\"/>"}{gems}</g>'
+        # Five-point crown with a jewelled band.
+        body = ("M10,44 L10,20 L27,34 L38,10 L50,28 L62,10 L73,34 L90,20 L90,44 Z")
+        band = '<rect x="8" y="44" width="84" height="12" rx="3"/>'
+        gems = ('<circle cx="10" cy="20" r="4"/><circle cx="38" cy="10" r="4"/>'
+                '<circle cx="62" cy="10" r="4"/><circle cx="90" cy="20" r="4"/>')
+        jewel = f'<path d="M50,45 L55,50 L50,55 L45,50 Z" fill="{PAPER}"/>'
+        return f'<g fill="{color}"><path d="{body}"/>{band}{gems}</g>{jewel}'
+    if kind == "Q":
+        # Scalloped tiara with pearls.
+        body = ("M12,44 L12,24 C22,26 30,32 34,40 C36,22 44,10 50,6 "
+                "C56,10 64,22 66,40 C70,32 78,26 88,24 L88,44 Z")
+        band = '<rect x="10" y="44" width="80" height="11" rx="3"/>'
+        pearls = ('<circle cx="12" cy="23" r="4"/><circle cx="50" cy="6" r="4.5"/>'
+                  '<circle cx="88" cy="23" r="4"/>')
+        dots = "".join(f'<circle cx="{x}" cy="49.5" r="2.2" fill="{PAPER}"/>'
+                       for x in (26, 38, 50, 62, 74))
+        return f'<g fill="{color}"><path d="{body}"/>{band}{pearls}</g>{dots}'
+    # Jack: a soft cap with a band and a feather.
+    dome = "M8,44 C6,28 22,16 46,18 C66,19 84,28 92,44 Z"
+    band = '<rect x="6" y="44" width="88" height="11" rx="4"/>'
+    feather = "M62,24 C68,8 82,0 100,2 C96,12 86,22 70,30 Z"
+    quill = ('<path d="M66,27 C76,16 86,8 98,3" fill="none" '
+             f'stroke="{PAPER}" stroke-width="1.6"/>')
+    return f'<g fill="{color}"><path d="{dome}"/>{band}<path d="{feather}"/></g>{quill}'
 
 
 def face_card(rank: str, suit: str, color: str) -> str:
-    """Court cards: a framed panel with crown and monogram, mirrored top/bottom."""
+    """Court cards: a framed panel with emblem and monogram, mirrored top/bottom."""
     px0, py0 = 46, 62
     pw, ph = W - 2 * px0, H - 2 * py0
     cx, cy = W / 2, H / 2
-    tint = "#f3ede0"
+    tint = "#f4eee1"
     parts = [
         f'<rect x="{px0}" y="{py0}" width="{pw}" height="{ph}" rx="6" '
         f'fill="{tint}" stroke="{GOLD}" stroke-width="2"/>',
         f'<rect x="{px0 + 5}" y="{py0 + 5}" width="{pw - 10}" height="{ph - 10}" '
         f'rx="3" fill="none" stroke="{GOLD}" stroke-width="0.75"/>',
     ]
-    # One half is drawn upright in the top half of the panel (y 62..175),
-    # then repeated rotated 180 degrees for the bottom half.
-    crown_scale = 0.72                       # 100x60 box -> 72x43
-    crown_y = py0 + 14
-    letter_baseline = py0 + 104              # 166: cap height stays above centre
+    crown_scale = 0.7                        # 100x60 box -> 70x42
+    crown_y = py0 + 13
+    baseline = py0 + 96                      # 158: descenders stay above centre
     half = (
         f'<g transform="translate({cx - 50 * crown_scale},{crown_y}) '
         f'scale({crown_scale})">{crown(color, rank)}</g>'
-        f'<text x="{cx}" y="{letter_baseline}" font-size="56" font-weight="700" '
+        f'<text x="{cx}" y="{baseline}" font-size="50" font-weight="700" '
         f'text-anchor="middle" fill="{color}" '
         f'font-family="Georgia, Times New Roman, serif">{rank}</text>'
-        + suit_glyph(suit, cx - 52, letter_baseline - 18, 24, color)
-        + suit_glyph(suit, cx + 52, letter_baseline - 18, 24, color)
+        + suit_glyph(suit, cx - 50, baseline - 17, 22, color)
+        + suit_glyph(suit, cx + 50, baseline - 17, 22, color)
     )
     parts.append(half)
     parts.append(f'<g transform="rotate(180 {cx} {cy})">{half}</g>')
-    # thin rule across the middle to separate the two halves
+    # Centre rule with a small gold lozenge.
     parts.append(
-        f'<line x1="{px0 + 14}" y1="{cy}" x2="{px0 + pw - 14}" y2="{cy}" '
+        f'<line x1="{px0 + 16}" y1="{cy}" x2="{cx - 9}" y2="{cy}" '
         f'stroke="{GOLD}" stroke-width="0.75"/>'
+        f'<line x1="{cx + 9}" y1="{cy}" x2="{px0 + pw - 16}" y2="{cy}" '
+        f'stroke="{GOLD}" stroke-width="0.75"/>'
+        f'<path d="M{cx},{cy - 4} L{cx + 4},{cy} L{cx},{cy + 4} L{cx - 4},{cy} Z" '
+        f'fill="{GOLD}"/>'
     )
     return "".join(parts)
 
@@ -238,14 +248,20 @@ def card_svg(rank: str, suit_key: str) -> str:
 # --- Jokers and back -------------------------------------------------------
 def joker_svg(color: str, label: str) -> str:
     cx, cy = W / 2, H / 2
-    # A jester's hat: three curved points with bells.
+    # Three-pointed jester hat with bells, in a 120x130 box centred on the card.
     hat = (
-        f'<g transform="translate({cx - 60},{cy - 90})" fill="{color}">'
-        '<path d="M60,120 L10,110 C0,70 20,40 8,10 C40,30 50,60 60,70 '
-        'C70,40 90,20 112,10 C100,40 120,70 110,110 Z"/>'
-        '<circle cx="8" cy="10" r="9"/><circle cx="112" cy="10" r="9"/>'
-                '</g>'
-        f'<rect x="{cx - 46}" y="{cy + 26}" width="92" height="12" rx="6" fill="{GOLD}"/>'
+        f'<g transform="translate({cx - 60},{cy - 78})" fill="{color}">'
+        '<path d="M60,118 L18,110 C10,88 14,66 2,46 C26,50 42,64 52,86 '
+        'C48,58 52,30 60,6 C68,30 72,58 68,86 C78,64 94,50 118,46 '
+        'C106,66 110,88 102,110 Z"/>'
+        '<circle cx="3" cy="45" r="8"/><circle cx="60" cy="6" r="8"/>'
+        '<circle cx="117" cy="45" r="8"/>'
+        '</g>'
+        # collar: scalloped band
+        f'<path d="M{cx - 52},{cy + 40} '
+        + " ".join(f'a13,13 0 0 1 26,0' for _ in range(4)) +
+        f' l0,10 l-104,0 Z" fill="{GOLD}"/>'
+        f'<rect x="{cx - 52}" y="{cy + 40}" width="104" height="8" fill="{color}"/>'
     )
     text = "".join(
         f'<text x="26" y="{50 + i * 24}" font-size="20" font-weight="700" '
