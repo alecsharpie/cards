@@ -246,32 +246,92 @@ def card_svg(rank: str, suit_key: str) -> str:
 
 
 # --- Jokers and back -------------------------------------------------------
-def joker_svg(color: str, label: str) -> str:
+def joker_svg(color: str, accent: str, label: str) -> str:
+    """A juggling jester in the court-card panel, breaking out of the frame."""
     cx, cy = W / 2, H / 2
-    # A jester: floppy three-point cap draping past a face, bells on the tips,
-    # scalloped collar. Drawn in a 140x150 box centred on the card.
-    ox, oy = cx - 70, cy - 78
-    face = (
-        f'<circle cx="70" cy="110" r="30" fill="{PAPER}" stroke="{color}" stroke-width="3"/>'
-        f'<circle cx="60" cy="110" r="2.8" fill="{color}"/>'
-        f'<circle cx="80" cy="110" r="2.8" fill="{color}"/>'
-        f'<path d="M58,121 Q70,132 82,121" fill="none" stroke="{color}" '
-        f'stroke-width="2.5" stroke-linecap="round"/>'
+    px0, py0 = 46, 62
+    pw, ph = W - 2 * px0, H - 2 * py0
+    tint = "#f4eee1"
+    pid = f"motley-{label.lower()}"
+
+    defs = (
+        f'<defs><pattern id="{pid}" width="16" height="16" '
+        'patternUnits="userSpaceOnUse" patternTransform="rotate(45)">'
+        f'<rect width="16" height="16" fill="{accent}"/>'
+        f'<rect width="8" height="8" fill="{color}"/>'
+        f'<rect x="8" y="8" width="8" height="8" fill="{color}"/>'
+        '</pattern>'
+        f'<clipPath id="{pid}-clip"><rect x="{px0 + 2}" y="{py0 + 2}" '
+        f'width="{pw - 4}" height="{ph - 4}" rx="5"/></clipPath></defs>'
     )
-    hat = (
-        '<path d="M30,84 C4,72 -10,104 8,132 C18,108 30,92 48,76 '
-        'C52,46 57,22 64,8 C74,26 82,48 92,76 '
-        'C110,92 122,108 132,132 C150,104 136,72 110,84 Q70,100 30,84 Z"/>'
-        '<circle cx="8" cy="133" r="7.5"/><circle cx="64" cy="8" r="7.5"/>'
-        '<circle cx="132" cy="133" r="7.5"/>'
+    panel = (
+        f'<rect x="{px0}" y="{py0}" width="{pw}" height="{ph}" rx="6" '
+        f'fill="{tint}" stroke="{GOLD}" stroke-width="2"/>'
+        f'<rect x="{px0 + 5}" y="{py0 + 5}" width="{pw - 10}" height="{ph - 10}" '
+        f'rx="3" fill="none" stroke="{GOLD}" stroke-width="0.75"/>'
     )
+    # Tunic in diamond motley, clipped to the panel.
+    tunic = (
+        f'<g clip-path="url(#{pid}-clip)">'
+        f'<path d="M62,{py0 + ph} L62,262 C62,238 92,228 125,228 '
+        f'C158,228 188,238 188,262 L188,{py0 + ph} Z" fill="url(#{pid})"/>'
+        '</g>'
+    )
+    # Pointed collar with bells.
     collar = (
-        f'<path d="M25,139 ' + " ".join('a11.25,11.25 0 0 1 22.5,0' for _ in range(4)) +
-        f' l0,11 l-90,0 Z" fill="{GOLD}"/>'
+        f'<path d="M74,226 L92,250 L108,229 L125,256 L142,229 L158,250 L176,226 Z" '
+        f'fill="{color}"/>'
+        f'<path d="M84,226 L96,242 L110,228 L125,246 L140,228 L154,242 L166,226 Z" '
+        f'fill="{accent}"/>'
+        + "".join(f'<circle cx="{x}" cy="{y}" r="3.5" fill="{GOLD}"/>'
+                  for x, y in ((92, 252), (125, 258), (158, 252)))
     )
-    figure = (
-        f'<g transform="translate({ox},{oy})">{collar}{face}'
-        f'<g fill="{color}">{hat}</g></g>'
+    head = (
+        f'<circle cx="125" cy="194" r="32" fill="{PAPER}" stroke="{color}" stroke-width="3"/>'
+        # cheeks
+        f'<circle cx="104" cy="203" r="4" fill="{accent}"/>'
+        f'<circle cx="146" cy="203" r="4" fill="{accent}"/>'
+        # brows
+        f'<path d="M104,180 Q112,173 120,179" fill="none" stroke="{color}" '
+        'stroke-width="2.5" stroke-linecap="round"/>'
+        f'<path d="M130,176 Q139,168 148,176" fill="none" stroke="{color}" '
+        'stroke-width="2.5" stroke-linecap="round"/>'
+        # open eye and wink
+        f'<circle cx="112" cy="190" r="3.6" fill="{color}"/>'
+        f'<path d="M131,191 Q139,185 147,191" fill="none" stroke="{color}" '
+        'stroke-width="2.5" stroke-linecap="round"/>'
+        # nose and grin
+        f'<path d="M125,193 L121,201 L129,201" fill="none" stroke="{color}" '
+        'stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>'
+        f'<path d="M107,206 Q125,226 143,206" fill="none" stroke="{color}" '
+        'stroke-width="3" stroke-linecap="round"/>'
+        f'<path d="M112,208 Q125,216 138,208" fill="{PAPER}" stroke="none"/>'
+    )
+    # Three-point motley cap; the outer bells poke past the frame.
+    hat = (
+        f'<path d="M106,160 C76,146 44,164 48,214 C62,186 80,172 100,174 Z" fill="{color}"/>'
+        f'<path d="M108,162 C104,128 118,104 150,90 C144,118 146,142 146,162 Z" fill="{accent}"/>'
+        f'<path d="M144,160 C174,146 206,164 202,214 C188,186 170,172 150,174 Z" fill="{color}"/>'
+        f'<path d="M90,174 Q125,148 160,174 Q125,186 90,174 Z" fill="{accent}"/>'
+        f'<path d="M92,174 Q125,152 158,174" fill="none" stroke="{color}" stroke-width="2.5"/>'
+        f'<circle cx="47" cy="216" r="6" fill="{GOLD}"/>'
+        f'<circle cx="152" cy="89" r="6" fill="{GOLD}"/>'
+        f'<circle cx="203" cy="216" r="6" fill="{GOLD}"/>'
+    )
+    # The four suits juggled in an arc over the cap.
+    P0, P1, P2 = (62, 126), (125, 24), (188, 126)
+
+    def bez(t):
+        x = (1 - t) ** 2 * P0[0] + 2 * (1 - t) * t * P1[0] + t * t * P2[0]
+        y = (1 - t) ** 2 * P0[1] + 2 * (1 - t) * t * P1[1] + t * t * P2[1]
+        return x, y
+
+    arc = (f'<path d="M{P0[0]},{P0[1]} Q{P1[0]},{P1[1]} {P2[0]},{P2[1]}" '
+           f'fill="none" stroke="{GOLD}" stroke-width="1.2" stroke-dasharray="3 4"/>')
+    juggled = "".join(
+        suit_glyph(suit, *bez(t), 21, col)
+        for suit, col, t in (("spades", BLACK, 0.06), ("hearts", RED, 0.34),
+                             ("diamonds", RED, 0.66), ("clubs", BLACK, 0.94))
     )
     text = "".join(
         f'<text x="26" y="{50 + i * 24}" font-size="20" font-weight="700" '
@@ -280,7 +340,8 @@ def joker_svg(color: str, label: str) -> str:
         for i, ch in enumerate("JOKER")
     )
     flipped = f'<g transform="rotate(180 {cx} {cy})">{text}</g>'
-    body = frame() + text + flipped + figure
+    body = (frame() + defs + panel + text + flipped + arc + juggled
+            + tunic + collar + head + hat)
     return wrap(body, f"{label} Joker")
 
 
@@ -352,8 +413,8 @@ def main() -> None:
             (out / name).write_text(card_svg(rank, suit_key))
             written.append(name)
 
-    (out / "joker_red.svg").write_text(joker_svg(RED, "Red"))
-    (out / "joker_black.svg").write_text(joker_svg(BLACK, "Black"))
+    (out / "joker_red.svg").write_text(joker_svg(RED, GOLD, "Red"))
+    (out / "joker_black.svg").write_text(joker_svg(BLACK, "#9a9a9a", "Black"))
     (out / "back.svg").write_text(back_svg())
     written += ["joker_red.svg", "joker_black.svg", "back.svg"]
 
