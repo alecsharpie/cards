@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Card Table</title>
 <style>
   :root {
@@ -10,7 +10,9 @@
     --card-h: 154px;
   }
   html, body { margin: 0; height: 100%; overflow: hidden; background: #2b1a0e;
-               font: 13px/1.4 system-ui, -apple-system, sans-serif; }
+               font: 13px/1.4 system-ui, -apple-system, sans-serif;
+               touch-action: none; overscroll-behavior: none;
+               -webkit-text-size-adjust: 100%; -webkit-touch-callout: none; }
   #table {
     position: fixed; inset: 0;
     background:
@@ -46,19 +48,35 @@
     pointer-events: none; -webkit-user-drag: none;
   }
   #ui {
-    position: fixed; left: 24px; top: 24px; z-index: 100000;
+    position: fixed; z-index: 100000;
+    left: max(24px, env(safe-area-inset-left));
+    top: max(24px, env(safe-area-inset-top));
+    max-width: calc(100vw - 2 * max(24px, env(safe-area-inset-left)));
+    box-sizing: border-box;
     display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
     padding: 8px 10px; border-radius: 10px;
     background: rgba(0,0,0,.45); color: #f1e9d6;
     backdrop-filter: blur(6px);
+    touch-action: manipulation;
   }
   #ui button {
     font: inherit; padding: 6px 12px; border-radius: 6px; cursor: pointer;
     border: 1px solid rgba(255,255,255,.25); background: rgba(255,255,255,.1);
-    color: inherit;
+    color: inherit; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
   }
   #ui button:hover { background: rgba(255,255,255,.22); }
   #hint { opacity: .75; margin-left: 6px; }
+  @media (max-width: 640px) {
+    #ui {
+      left: max(10px, env(safe-area-inset-left));
+      right: max(10px, env(safe-area-inset-right));
+      top: max(10px, env(safe-area-inset-top));
+      max-width: none; gap: 6px; padding: 6px 8px;
+      justify-content: center;
+    }
+    #ui button { padding: 8px 10px; flex: 1 1 auto; }
+    #hint { flex-basis: 100%; margin: 2px 0 0; text-align: center; font-size: 12px; }
+  }
 </style>
 </head>
 <body>
@@ -78,7 +96,10 @@
 // ===========================================================================
 // Constants
 // ===========================================================================
-const CARD_W = 110, CARD_H = 154;
+const CARD_SCALE = Math.min(innerWidth, innerHeight) < 600 ? 0.72 : 1;
+const CARD_W = Math.round(110 * CARD_SCALE), CARD_H = Math.round(154 * CARD_SCALE);
+document.documentElement.style.setProperty('--card-w', CARD_W + 'px');
+document.documentElement.style.setProperty('--card-h', CARD_H + 'px');
 const MASS = 1;
 // Thin rectangular plate, body frame: x across, y along, z = face normal.
 const IXX = MASS * CARD_H * CARD_H / 12;
@@ -100,12 +121,12 @@ const AIR_TUMBLE = 1.6;          // 1/s, angular drag for end-over-end tumbling
 const AIR_SPIN = 0.35;           // 1/s, angular drag for spinning like a frisbee
 const MAX_OMEGA = 60;
 
-const EDGE_PAD = 34;             // rail distance from the table edge
+const EDGE_PAD = 34 * CARD_SCALE; // rail distance from the table edge
 const LIFT_SPEED = 650;          // release speed above which a flat fling lifts
 const MAX_VZ = 700;
 const MAX_Z = 220;
 const GRAB_FRICTION = 22;        // felt drag on a card pulled flat by a point
-const EDGE_BAND = 36;            // grab this close to an edge to lift it
+const EDGE_BAND = 36 * CARD_SCALE; // grab this close to an edge to lift it
 const INWARD_COS = 0.55;         // push must be within ~56 deg of inward
 
 const SUITS = ['S', 'H', 'D', 'C'];
@@ -170,8 +191,14 @@ const CORNERS = [
   { x: CARD_W / 2, y: CARD_H / 2, z: 0 }, { x: -CARD_W / 2, y: CARD_H / 2, z: 0 },
 ];
 
+// On narrow screens the menu spans the top, so the felt starts below it.
+let topPad = EDGE_PAD;
+function measureTop() {
+  const ui = document.getElementById('ui').getBoundingClientRect();
+  topPad = innerWidth <= 640 ? ui.bottom + EDGE_PAD : EDGE_PAD;
+}
 function bounds() {
-  return { x0: EDGE_PAD, y0: EDGE_PAD,
+  return { x0: EDGE_PAD, y0: topPad,
            x1: innerWidth - EDGE_PAD, y1: innerHeight - EDGE_PAD };
 }
 
@@ -657,6 +684,19 @@ function endDrag(e) {
 table.addEventListener('pointerup', endDrag);
 table.addEventListener('pointercancel', endDrag);
 
+// Mobile Safari zooms on double-tap and pinch even with touch-action set;
+// cancelling the raw touch events on the table stops that (pointer events
+// still fire). Pinch anywhere is cancelled too so the page can't get stuck
+// zoomed in.
+const swallow = e => { if (e.cancelable) e.preventDefault(); };
+table.addEventListener('touchstart', swallow, { passive: false });
+table.addEventListener('touchmove', swallow, { passive: false });
+table.addEventListener('touchend', swallow, { passive: false });
+document.addEventListener('touchmove', e => { if (e.touches.length > 1) swallow(e); }, { passive: false });
+document.addEventListener('gesturestart', swallow, { passive: false });
+document.addEventListener('gesturechange', swallow, { passive: false });
+document.addEventListener('dblclick', swallow, { passive: false });
+
 // ===========================================================================
 // Buttons
 // ===========================================================================
@@ -668,7 +708,7 @@ function gather(shuffle = false) {
     }
     cards.forEach((c, k) => { c.order = k; c.render(); });
   }
-  const cx = innerWidth / 2, cy = innerHeight / 2;
+  const cx = innerWidth / 2, cy = (topPad + innerHeight) / 2;
   cards.forEach((c, i) => {
     if (c.held) return;
     setTimeout(() => {
@@ -704,10 +744,10 @@ function flipAll() {
 
 function deal() {
   const top = cards.slice(-5).reverse();
-  const y = innerHeight - 200;
+  const y = innerHeight - CARD_H * 1.3;
   top.forEach((c, i) => {
     if (c.held) return;
-    const tx = innerWidth / 2 + (i - 2) * 130;
+    const tx = innerWidth / 2 + (i - 2) * Math.min(130 * CARD_SCALE, innerWidth / 5.5);
     setTimeout(() => { if (!c.held) c.slideTo(tx, y, rand(-0.12, 0.12), true); }, i * 140);
   });
 }
@@ -735,8 +775,9 @@ function frame(now) {
 }
 
 makeDeck();
-stackAt(innerWidth * 0.5, innerHeight * 0.5);
-addEventListener('resize', () => cards.forEach(c => c.wake()));
+measureTop();
+stackAt(innerWidth * 0.5, (topPad + innerHeight) * 0.5);
+addEventListener('resize', () => { measureTop(); cards.forEach(c => c.wake()); });
 requestAnimationFrame(frame);
 </script>
 </body>
