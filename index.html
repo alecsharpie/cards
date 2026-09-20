@@ -32,10 +32,20 @@
     transform-style: preserve-3d;
     will-change: transform;
     cursor: grab;
-    transition: opacity .35s ease;
   }
-  /* Cards stay invisible until their artwork has decoded, then fade in. */
-  #table:not(.ready) .card { opacity: 0; pointer-events: none; }
+  /* Cards stay hidden until their artwork has decoded. Never fade the cards
+     themselves: opacity below 1 flattens their 3D faces and the front leaks
+     through the back. A felt-coloured veil fades out over them instead. */
+  #table:not(.ready) .card { visibility: hidden; pointer-events: none; }
+  #veil {
+    position: fixed; inset: 0; z-index: 50000; pointer-events: none;
+    background:
+      radial-gradient(ellipse at 50% 40%, #2f7a4a 0%, #23623a 55%, #194a2c 100%);
+    box-shadow: inset 0 0 0 14px #5a3a1e, inset 0 0 0 18px #8a5a2e,
+                inset 0 0 120px rgba(0,0,0,.55);
+    transition: opacity .4s ease;
+  }
+  #veil.gone { opacity: 0; }
   .card.held { cursor: grabbing; }
   .card .face, .card .back {
     position: absolute; inset: 0;
@@ -83,6 +93,7 @@
 </head>
 <body>
 <div id="table"></div>
+<div id="veil"></div>
 <div id="ui">
   <button id="btn-gather">Gather</button>
   <button id="btn-shuffle">Shuffle</button>
@@ -789,7 +800,15 @@ stackAt(innerWidth * 0.5, (topPad + innerHeight) * 0.5);
   const imgs = [...table.querySelectorAll('img')];
   const decoded = Promise.all(imgs.map(img => img.decode().catch(() => {})));
   const grace = new Promise(r => setTimeout(r, 4000));
-  Promise.race([decoded, grace]).then(() => table.classList.add('ready'));
+  Promise.race([decoded, grace]).then(() => {
+    table.classList.add('ready');
+    const veil = document.getElementById('veil');
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      veil.classList.add('gone');
+      veil.addEventListener('transitionend', () => veil.remove(), { once: true });
+      setTimeout(() => veil.remove(), 1000);
+    }));
+  });
 }
 addEventListener('resize', () => { measureTop(); cards.forEach(c => c.wake()); });
 requestAnimationFrame(frame);
