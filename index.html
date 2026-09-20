@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Card Table</title>
+<link rel="preload" href="deck/back.svg" as="image" type="image/svg+xml">
 <style>
   :root {
     --card-w: 110px;
@@ -31,7 +32,10 @@
     transform-style: preserve-3d;
     will-change: transform;
     cursor: grab;
+    transition: opacity .35s ease;
   }
+  /* Cards stay invisible until their artwork has decoded, then fade in. */
+  #table:not(.ready) .card { opacity: 0; pointer-events: none; }
   .card.held { cursor: grabbing; }
   .card .face, .card .back {
     position: absolute; inset: 0;
@@ -778,6 +782,15 @@ function frame(now) {
 makeDeck();
 measureTop();
 stackAt(innerWidth * 0.5, (topPad + innerHeight) * 0.5);
+
+// Reveal the deck once every card image has decoded (or after a grace period,
+// so a slow file can never hold the whole table hostage).
+{
+  const imgs = [...table.querySelectorAll('img')];
+  const decoded = Promise.all(imgs.map(img => img.decode().catch(() => {})));
+  const grace = new Promise(r => setTimeout(r, 4000));
+  Promise.race([decoded, grace]).then(() => table.classList.add('ready'));
+}
 addEventListener('resize', () => { measureTop(); cards.forEach(c => c.wake()); });
 requestAnimationFrame(frame);
 </script>
