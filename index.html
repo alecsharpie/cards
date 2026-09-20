@@ -123,6 +123,7 @@ const LIFT_SPEED = 650;          // release speed above which a flat fling lifts
 const MAX_VZ = 700;
 const MAX_Z = 220;
 const GRAB_FRICTION = 22;        // felt drag on a card pulled flat by a point
+const NO_SPIN_ZONE = 0.5;        // grab inside this fraction of the half-size: no swing
 const EDGE_BAND = 36 * CARD_SCALE; // grab this close to an edge to lift it
 const INWARD_COS = 0.55;         // push must be within ~56 deg of inward
 
@@ -616,7 +617,10 @@ function stepFlat(dt) {
   const vcx = pvx - drag.omega * ry;
   const vcy = pvy + drag.omega * rx;
   const fx = -GRAB_FRICTION * vcx, fy = -GRAB_FRICTION * vcy;
-  const torque = rx * fy - ry * fx;
+  // Grabs near the middle don't swing the card; torque ramps up toward the edges.
+  const rho = Math.hypot(drag.gx / (CARD_W / 2), drag.gy / (CARD_H / 2));
+  const swing = clamp((rho - NO_SPIN_ZONE) / (1 - NO_SPIN_ZONE), 0, 1);
+  const torque = (rx * fy - ry * fx) * swing;
   drag.omega += (torque / IZZ) * dt;
   drag.omega *= Math.exp(-0.8 * dt);
   drag.yaw += drag.omega * dt;

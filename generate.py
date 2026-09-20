@@ -248,20 +248,30 @@ def card_svg(rank: str, suit_key: str) -> str:
 # --- Jokers and back -------------------------------------------------------
 def joker_svg(color: str, label: str) -> str:
     cx, cy = W / 2, H / 2
-    # Three-pointed jester hat with bells, in a 120x130 box centred on the card.
+    # A jester: floppy three-point cap draping past a face, bells on the tips,
+    # scalloped collar. Drawn in a 140x150 box centred on the card.
+    ox, oy = cx - 70, cy - 78
+    face = (
+        f'<circle cx="70" cy="110" r="30" fill="{PAPER}" stroke="{color}" stroke-width="3"/>'
+        f'<circle cx="60" cy="110" r="2.8" fill="{color}"/>'
+        f'<circle cx="80" cy="110" r="2.8" fill="{color}"/>'
+        f'<path d="M58,121 Q70,132 82,121" fill="none" stroke="{color}" '
+        f'stroke-width="2.5" stroke-linecap="round"/>'
+    )
     hat = (
-        f'<g transform="translate({cx - 60},{cy - 78})" fill="{color}">'
-        '<path d="M60,118 L18,110 C10,88 14,66 2,46 C26,50 42,64 52,86 '
-        'C48,58 52,30 60,6 C68,30 72,58 68,86 C78,64 94,50 118,46 '
-        'C106,66 110,88 102,110 Z"/>'
-        '<circle cx="3" cy="45" r="8"/><circle cx="60" cy="6" r="8"/>'
-        '<circle cx="117" cy="45" r="8"/>'
-        '</g>'
-        # collar: scalloped band
-        f'<path d="M{cx - 52},{cy + 40} '
-        + " ".join(f'a13,13 0 0 1 26,0' for _ in range(4)) +
-        f' l0,10 l-104,0 Z" fill="{GOLD}"/>'
-        f'<rect x="{cx - 52}" y="{cy + 40}" width="104" height="8" fill="{color}"/>'
+        '<path d="M30,84 C4,72 -10,104 8,132 C18,108 30,92 48,76 '
+        'C52,46 57,22 64,8 C74,26 82,48 92,76 '
+        'C110,92 122,108 132,132 C150,104 136,72 110,84 Q70,100 30,84 Z"/>'
+        '<circle cx="8" cy="133" r="7.5"/><circle cx="64" cy="8" r="7.5"/>'
+        '<circle cx="132" cy="133" r="7.5"/>'
+    )
+    collar = (
+        f'<path d="M25,139 ' + " ".join('a11.25,11.25 0 0 1 22.5,0' for _ in range(4)) +
+        f' l0,11 l-90,0 Z" fill="{GOLD}"/>'
+    )
+    figure = (
+        f'<g transform="translate({ox},{oy})">{collar}{face}'
+        f'<g fill="{color}">{hat}</g></g>'
     )
     text = "".join(
         f'<text x="26" y="{50 + i * 24}" font-size="20" font-weight="700" '
@@ -270,7 +280,7 @@ def joker_svg(color: str, label: str) -> str:
         for i, ch in enumerate("JOKER")
     )
     flipped = f'<g transform="rotate(180 {cx} {cy})">{text}</g>'
-    body = frame() + text + flipped + hat
+    body = frame() + text + flipped + figure
     return wrap(body, f"{label} Joker")
 
 
