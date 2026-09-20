@@ -2,7 +2,7 @@
 
 A deck of SVG playing cards and a physics card table to play with them.
 
-**Play:** https://alecsharpie.github.io/cards/
+**Play:** https://www.alecsharpie.me/cards/
 
 - `index.html` — the table. Every card is a 3D rigid body: gravity, corner
   contacts with friction on the felt, air drag, and a kinematic hand while you
