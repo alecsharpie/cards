@@ -1,0 +1,743 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Card Table</title>
+<style>
+  :root {
+    --card-w: 110px;
+    --card-h: 154px;
+  }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #2b1a0e;
+               font: 13px/1.4 system-ui, -apple-system, sans-serif; }
+  #table {
+    position: fixed; inset: 0;
+    background:
+      radial-gradient(ellipse at 50% 40%, #2f7a4a 0%, #23623a 55%, #194a2c 100%);
+    box-shadow: inset 0 0 0 14px #5a3a1e, inset 0 0 0 18px #8a5a2e,
+                inset 0 0 120px rgba(0,0,0,.55);
+    perspective: 1400px;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    overflow: hidden;
+  }
+  .card {
+    position: absolute; left: 0; top: 0;
+    width: var(--card-w); height: var(--card-h);
+    transform-style: preserve-3d;
+    will-change: transform;
+    cursor: grab;
+  }
+  .card.held { cursor: grabbing; }
+  .card .face, .card .back {
+    position: absolute; inset: 0;
+    border-radius: 7px;
+    backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
+    box-shadow: var(--sh, 1px 2px 4px rgba(0,0,0,.35));
+    background: #fdfcf8;
+    overflow: hidden;
+  }
+  .card .back { transform: rotateX(180deg); }
+  .card img {
+    display: block; width: 100%; height: 100%;
+    pointer-events: none; -webkit-user-drag: none;
+  }
+  #ui {
+    position: fixed; left: 24px; top: 24px; z-index: 100000;
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    padding: 8px 10px; border-radius: 10px;
+    background: rgba(0,0,0,.45); color: #f1e9d6;
+    backdrop-filter: blur(6px);
+  }
+  #ui button {
+    font: inherit; padding: 6px 12px; border-radius: 6px; cursor: pointer;
+    border: 1px solid rgba(255,255,255,.25); background: rgba(255,255,255,.1);
+    color: inherit;
+  }
+  #ui button:hover { background: rgba(255,255,255,.22); }
+  #hint { opacity: .75; margin-left: 6px; }
+</style>
+</head>
+<body>
+<div id="table"></div>
+<div id="ui">
+  <button id="btn-gather">Gather</button>
+  <button id="btn-shuffle">Shuffle</button>
+  <button id="btn-scatter">Scatter</button>
+  <button id="btn-flipall">Flip all</button>
+  <button id="btn-deal">Deal 5</button>
+  <span id="hint">Pull to slide &middot; push an edge inward to lift and flip &middot; let go mid-lift to throw &middot; tap to flip it away from you</span>
+</div>
+
+<script>
+'use strict';
+
+// ===========================================================================
+// Constants
+// ===========================================================================
+const CARD_W = 110, CARD_H = 154;
+const MASS = 1;
+// Thin rectangular plate, body frame: x across, y along, z = face normal.
+const IXX = MASS * CARD_H * CARD_H / 12;
+const IYY = MASS * CARD_W * CARD_W / 12;
+const IZZ = IXX + IYY;
+
+const GRAVITY = 2600;            // px/s^2, z is toward the viewer
+const SUBSTEP = 1 / 720;
+
+const K_CONTACT = 2.5e4;         // corner-vs-felt spring
+const B_CONTACT = 110;           // corner-vs-felt damping (nearly dead landing)
+const MU_FELT = 0.5;             // card on felt
+const MU_STEER = 0.06;           // while a scripted move is steering it
+const K_WALL = 1.5e4, B_WALL = 60; // table rails
+
+const AIR_PAR = 0.5;             // 1/s, drag for motion in the card's plane
+const AIR_PERP = 5.5;            // 1/s, drag for motion through the air face-on
+const AIR_TUMBLE = 1.6;          // 1/s, angular drag for end-over-end tumbling
+const AIR_SPIN = 0.35;           // 1/s, angular drag for spinning like a frisbee
+const MAX_OMEGA = 60;
+
+const EDGE_PAD = 34;             // rail distance from the table edge
+const LIFT_SPEED = 650;          // release speed above which a flat fling lifts
+const MAX_VZ = 700;
+const MAX_Z = 220;
+const GRAB_FRICTION = 22;        // felt drag on a card pulled flat by a point
+const EDGE_BAND = 36;            // grab this close to an edge to lift it
+const INWARD_COS = 0.55;         // push must be within ~56 deg of inward
+
+const SUITS = ['S', 'H', 'D', 'C'];
+const RANKS = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
+
+const TAU = Math.PI * 2;
+const rand = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const wrapAngle = a => ((a + Math.PI) % TAU + TAU) % TAU - Math.PI;
+
+// ===========================================================================
+// Quaternion / matrix helpers
+// ===========================================================================
+const Q1 = { w: 1, x: 0, y: 0, z: 0 };
+function qmul(a, b) {
+  return {
+    w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+    x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+    y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+    z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+  };
+}
+function qaxis(x, y, z, ang) {
+  const s = Math.sin(ang / 2);
+  return { w: Math.cos(ang / 2), x: x * s, y: y * s, z: z * s };
+}
+function qnorm(q) {
+  const l = Math.hypot(q.w, q.x, q.y, q.z) || 1;
+  q.w /= l; q.x /= l; q.y /= l; q.z /= l;
+  return q;
+}
+// Row-major 3x3 rotation matrix.
+function qmat(q) {
+  const { w, x, y, z } = q;
+  return [
+    1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w),
+    2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w),
+    2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y),
+  ];
+}
+const mulR = (R, v) => ({
+  x: R[0] * v.x + R[1] * v.y + R[2] * v.z,
+  y: R[3] * v.x + R[4] * v.y + R[5] * v.z,
+  z: R[6] * v.x + R[7] * v.y + R[8] * v.z,
+});
+const mulRT = (R, v) => ({
+  x: R[0] * v.x + R[3] * v.y + R[6] * v.z,
+  y: R[1] * v.x + R[4] * v.y + R[7] * v.z,
+  z: R[2] * v.x + R[5] * v.y + R[8] * v.z,
+});
+const cross = (a, b) => ({
+  x: a.y * b.z - a.z * b.y,
+  y: a.z * b.x - a.x * b.z,
+  z: a.x * b.y - a.y * b.x,
+});
+// Flat pose on the felt: yaw about z, optionally turned face down.
+const flatQuat = (yaw, faceDown) =>
+  qmul(qaxis(0, 0, 1, yaw), faceDown ? qaxis(1, 0, 0, Math.PI) : Q1);
+
+const CORNERS = [
+  { x: -CARD_W / 2, y: -CARD_H / 2, z: 0 }, { x: CARD_W / 2, y: -CARD_H / 2, z: 0 },
+  { x: CARD_W / 2, y: CARD_H / 2, z: 0 }, { x: -CARD_W / 2, y: CARD_H / 2, z: 0 },
+];
+
+function bounds() {
+  return { x0: EDGE_PAD, y0: EDGE_PAD,
+           x1: innerWidth - EDGE_PAD, y1: innerHeight - EDGE_PAD };
+}
+
+// ===========================================================================
+// Card: a rigid thin plate
+// ===========================================================================
+class Card {
+  constructor(name, faceSrc) {
+    this.name = name;
+    this.p = { x: 0, y: 0, z: 0 };        // centre
+    this.q = { ...Q1 };                   // orientation (body -> world)
+    this.v = { x: 0, y: 0, z: 0 };
+    this.w = { x: 0, y: 0, z: 0 };        // angular velocity, world frame
+    this.R = qmat(this.q);
+    this.held = false;
+    this.asleep = false;
+    this.restTime = 0;
+    this.goal = null;
+    this.order = 0;
+
+    const el = document.createElement('div');
+    el.className = 'card';
+    el.innerHTML =
+      `<div class="face"><img src="${faceSrc}" alt="${name}"></div>` +
+      `<div class="back"><img src="deck/back.svg" alt="back"></div>`;
+    this.el = el;
+    el.__card = this;
+  }
+
+  get faceUp() { return this.R[8] > 0; }
+  get yaw() { return Math.atan2(this.R[3], this.R[0]); }
+  get flat() { return Math.abs(this.R[8]) > 0.995 && this.p.z < 1.5; }
+  get speed() { return Math.hypot(this.v.x, this.v.y, this.v.z); }
+  get inAir() { return this.p.z > 2 || Math.abs(this.R[8]) < 0.98; }
+
+  wake() { this.asleep = false; this.restTime = 0; }
+
+  setPose(x, y, z, q) {
+    this.p.x = x; this.p.y = y; this.p.z = z;
+    this.q = qnorm({ ...q });
+    this.R = qmat(this.q);
+  }
+
+  // Drop the card flat on the felt at its current yaw and facing.
+  settleFlat() {
+    this.setPose(this.p.x, this.p.y, 0, flatQuat(this.yaw, !this.faceUp));
+    this.v = { x: 0, y: 0, z: 0 };
+    this.w = { x: 0, y: 0, z: 0 };
+  }
+
+  sleep() { this.settleFlat(); this.asleep = true; this.render(); }
+
+  // Supporting line of the rectangle in world direction u: distance from the
+  // centre, and the hinge direction t. Touches an edge or a corner.
+  support(ux, uy) {
+    const c = Math.cos(-this.yaw), s = Math.sin(-this.yaw);
+    const ulx = ux * c - uy * s, uly = ux * s + uy * c;
+    const e = (CARD_W / 2) * Math.abs(ulx) + (CARD_H / 2) * Math.abs(uly);
+    return { e, tx: -uy, ty: ux };
+  }
+
+  // Inertia about an in-plane world axis (tx, ty) through the centre.
+  inertiaAbout(tx, ty) {
+    const tb = mulRT(this.R, { x: tx, y: ty, z: 0 });
+    return IXX * tb.x * tb.x + IYY * tb.y * tb.y + IZZ * tb.z * tb.z;
+  }
+
+  // Flick the card up on the edge/corner opposite the point (px, py), as if
+  // it were grabbed there and flipped: a hinge rotation about the support
+  // line with enough energy to carry it over the top.
+  flipFrom(px, py, margin = 1.6) {
+    if (!this.flat) return;
+    let ux = this.p.x - px, uy = this.p.y - py;
+    let l = Math.hypot(ux, uy);
+    if (l < 4) { const a = rand(0, TAU); ux = Math.cos(a); uy = Math.sin(a); l = 1; }
+    ux /= l; uy /= l;
+    const { e, tx, ty } = this.support(ux, uy);
+    const I = this.inertiaAbout(tx, ty) + MASS * e * e;      // about the hinge
+    const rate = Math.sqrt(2 * MASS * GRAVITY * e / I) * margin;
+    this.w = { x: tx * rate, y: ty * rate, z: this.w.z };
+    this.v = { x: 0, y: 0, z: e * rate };                    // hinge on the pivot
+    this.wake();
+  }
+
+  flipToss() { // flip about a random edge, used by scripted moves
+    const a = rand(0, TAU);
+    this.flipFrom(this.p.x - Math.cos(a) * 60, this.p.y - Math.sin(a) * 60, rand(1.5, 1.7));
+  }
+
+  slideTo(tx, ty, tyaw, face) {
+    this.goal = { x: tx, y: ty, yaw: tyaw, face, tossedAt: -1 };
+    this.wake();
+  }
+
+  // --- Physics ------------------------------------------------------------
+  step(h, b, now) {
+    if (this.asleep || this.held) return;
+    const R = this.R = qmat(this.q);
+    const p = this.p, v = this.v, w = this.w;
+    const F = { x: 0, y: 0, z: -MASS * GRAVITY };
+    const T = { x: 0, y: 0, z: 0 };
+
+    // Air: a card cuts through air edge-on but is pushed back face-on.
+    const n = { x: R[2], y: R[5], z: R[8] };
+    const vn = v.x * n.x + v.y * n.y + v.z * n.z;
+    F.x -= MASS * (AIR_PAR * (v.x - vn * n.x) + AIR_PERP * vn * n.x);
+    F.y -= MASS * (AIR_PAR * (v.y - vn * n.y) + AIR_PERP * vn * n.y);
+    F.z -= MASS * (AIR_PAR * (v.z - vn * n.z) + AIR_PERP * vn * n.z);
+
+    // Corner contacts with the felt and the rails. Damping and friction are
+    // impulse-limited: within one substep they can stop a corner but never
+    // reverse it, which keeps stiff contacts stable.
+    const mu = this.goal ? MU_STEER : MU_FELT;
+    let touching = 0;
+    const effMass = (r, d) => {          // apparent mass of point r along d
+      const rd = mulRT(R, cross(r, d));
+      return 1 / (1 / MASS + rd.x * rd.x / IXX + rd.y * rd.y / IYY + rd.z * rd.z / IZZ);
+    };
+    for (const rc of CORNERS) {
+      const r = mulR(R, rc);
+      const cx = p.x + r.x, cy = p.y + r.y, cz = p.z + r.z;
+      const wr = cross(w, r);
+      const cvx = v.x + wr.x, cvy = v.y + wr.y, cvz = v.z + wr.z;
+      let fx = 0, fy = 0, fz = 0;
+      if (cz < 0) {
+        touching++;
+        const mz = effMass(r, { x: 0, y: 0, z: 1 });
+        let fn = K_CONTACT * -cz - Math.sign(cvz) * Math.min(B_CONTACT * Math.abs(cvz), mz * Math.abs(cvz) / h);
+        if (fn < 0) fn = 0;
+        const vt = Math.hypot(cvx, cvy);
+        if (vt > 1e-6) {
+          const dx = cvx / vt, dy = cvy / vt;
+          const mt = effMass(r, { x: dx, y: dy, z: 0 });
+          const ft = Math.min(mu * fn, mt * vt / h);
+          fx -= dx * ft; fy -= dy * ft;
+        }
+        fz += fn;
+      }
+      const wallForce = (pen, vel, d) => {
+        if (pen <= 0) return 0;
+        const m = effMass(r, d);
+        return Math.max(0, K_WALL * pen - Math.sign(vel) * Math.min(B_WALL * Math.abs(vel), m * Math.abs(vel) / h));
+      };
+      if (cx < b.x0) fx += wallForce(b.x0 - cx, cvx, { x: 1, y: 0, z: 0 });
+      if (cx > b.x1) fx -= wallForce(cx - b.x1, -cvx, { x: 1, y: 0, z: 0 });
+      if (cy < b.y0) fy += wallForce(b.y0 - cy, cvy, { x: 0, y: 1, z: 0 });
+      if (cy > b.y1) fy -= wallForce(cy - b.y1, -cvy, { x: 0, y: 1, z: 0 });
+      if (fx || fy || fz) {
+        F.x += fx; F.y += fy; F.z += fz;
+        const tq = cross(r, { x: fx, y: fy, z: fz });
+        T.x += tq.x; T.y += tq.y; T.z += tq.z;
+      }
+    }
+
+    // Scripted moves steer toward a goal once the card is flat on the felt.
+    if (this.goal && this.flat) this.steer(F, T, now);
+    if (this.asleep) return;
+
+    // Linear
+    v.x += F.x / MASS * h; v.y += F.y / MASS * h; v.z += F.z / MASS * h;
+
+    // Angular, in the body frame (diagonal inertia, gyroscopic term kept).
+    const wb = mulRT(R, w), tb = mulRT(R, T);
+    const Lx = IXX * wb.x, Ly = IYY * wb.y, Lz = IZZ * wb.z;
+    tb.x -= wb.y * Lz - wb.z * Ly + AIR_TUMBLE * Lx;
+    tb.y -= wb.z * Lx - wb.x * Lz + AIR_TUMBLE * Ly;
+    tb.z -= wb.x * Ly - wb.y * Lx + AIR_SPIN * Lz;
+    wb.x += tb.x / IXX * h; wb.y += tb.y / IYY * h; wb.z += tb.z / IZZ * h;
+    const nw = mulR(R, wb);
+    const wl = Math.hypot(nw.x, nw.y, nw.z);
+    const ws = wl > MAX_OMEGA ? MAX_OMEGA / wl : 1;
+    w.x = nw.x * ws; w.y = nw.y * ws; w.z = nw.z * ws;
+
+    // Integrate
+    p.x += v.x * h; p.y += v.y * h; p.z += v.z * h;
+    if (p.z > MAX_Z) { p.z = MAX_Z; if (v.z > 0) v.z = 0; }
+    const q = this.q;
+    const dq = qmul({ w: 0, x: w.x, y: w.y, z: w.z }, q);
+    q.w += 0.5 * dq.w * h; q.x += 0.5 * dq.x * h;
+    q.y += 0.5 * dq.y * h; q.z += 0.5 * dq.z * h;
+    qnorm(q);
+
+    // Rest detection: flat, touching, still.
+    const flatNow = Math.abs(R[8]) > 0.995;
+    if (flatNow && touching >= 3 && this.speed < 4 && wl < 0.12) {
+      this.restTime += h;
+      if (this.restTime > 0.12 && !this.goal) this.sleep();
+    } else {
+      this.restTime = 0;
+    }
+  }
+
+  steer(F, T, now) {
+    const g = this.goal;
+    if (g.face !== undefined && g.face !== this.faceUp) {
+      // Wrong way up: flip it over, then keep steering after it lands.
+      if (this.speed < 40 && now - g.tossedAt > 900) {
+        g.tossedAt = now;
+        this.flipToss();
+      }
+      return;
+    }
+    const K = 400, D = 40;
+    const dx = g.x - this.p.x, dy = g.y - this.p.y;
+    F.x += K * dx - D * this.v.x;
+    F.y += K * dy - D * this.v.y;
+    const da = wrapAngle(g.yaw - this.yaw);
+    T.z += IZZ * (350 * da - 30 * this.w.z);
+    if (Math.hypot(dx, dy) < 3 && Math.abs(da) < 0.06 &&
+        this.speed < 25 && Math.abs(this.w.z) < 0.5) {
+      this.setPose(g.x, g.y, 0, flatQuat(g.yaw, !this.faceUp));
+      this.goal = null;
+      this.sleep();
+    }
+  }
+
+  // --- Rendering ----------------------------------------------------------
+  render() {
+    const R = this.R, p = this.p;
+    this.el.style.transform =
+      `translate3d(${(p.x - CARD_W / 2).toFixed(2)}px, ${(p.y - CARD_H / 2).toFixed(2)}px, ${p.z.toFixed(2)}px) ` +
+      `matrix3d(${R[0].toFixed(5)},${R[3].toFixed(5)},${R[6].toFixed(5)},0,` +
+      `${R[1].toFixed(5)},${R[4].toFixed(5)},${R[7].toFixed(5)},0,` +
+      `${R[2].toFixed(5)},${R[5].toFixed(5)},${R[8].toFixed(5)},0,0,0,0,1)`;
+    const z = p.z;
+    const alpha = clamp(0.38 - z * 0.0006, 0.12, 0.38);
+    this.el.style.setProperty('--sh',
+      `${(1 + z * 0.32).toFixed(1)}px ${(2 + z * 0.42).toFixed(1)}px ` +
+      `${(4 + z * 0.35).toFixed(1)}px rgba(0,0,0,${alpha.toFixed(3)})`);
+    const zi = (this.inAir || this.held) ? 1000 + this.order : this.order;
+    if (this._zi !== zi) { this.el.style.zIndex = zi; this._zi = zi; }
+  }
+}
+
+// ===========================================================================
+// Table
+// ===========================================================================
+const table = document.getElementById('table');
+const cards = [];
+
+function makeDeck() {
+  for (const s of SUITS) for (const r of RANKS) cards.push(new Card(r + s, `deck/${r}${s}.svg`));
+  cards.push(new Card('JOKER_R', 'deck/joker_red.svg'));
+  cards.push(new Card('JOKER_B', 'deck/joker_black.svg'));
+  cards.forEach((c, i) => { c.order = i; table.appendChild(c.el); });
+}
+
+function bringToTop(card) {
+  cards.splice(cards.indexOf(card), 1);
+  cards.push(card);
+  cards.forEach((c, k) => { c.order = k; c.render(); });
+}
+
+function stackAt(cx, cy, faceDown = true) {
+  cards.forEach(c => {
+    c.setPose(cx + rand(-1.5, 1.5), cy + rand(-1.5, 1.5), 0,
+              flatQuat(rand(-0.03, 0.03), faceDown));
+    c.v = { x: 0, y: 0, z: 0 }; c.w = { x: 0, y: 0, z: 0 };
+    c.goal = null;
+    c.asleep = true;
+    c.render();
+  });
+}
+
+// ===========================================================================
+// Pointer interaction. The hand is kinematic while it holds a card:
+//   flat - grab point pinned to the pointer, felt friction on the rest of the
+//          card swings it round behind your finger.
+//   tilt - grabbed near an edge and pushed inward: the far edge or corner
+//          stays on the felt as a hinge and the card lifts about it. One card
+//          length past the hinge is vertical, two lays it on its other face.
+// On release the exact pose and velocities go to the rigid body, so a card
+// let go mid-lift falls whichever way its weight leans.
+// ===========================================================================
+let drag = null;
+
+function pointerVelocity(samples, now) {
+  let i = samples.length - 1;
+  while (i > 0 && now - samples[i - 1].t < 70) i--;
+  const a = samples[i], b = samples[samples.length - 1];
+  const dt = (b.t - a.t) / 1000;
+  if (dt < 0.004) return { vx: 0, vy: 0 };
+  return { vx: (b.x - a.x) / dt, vy: (b.y - a.y) / dt };
+}
+
+function setGrab(card, px, py) {
+  const dx = px - card.p.x, dy = py - card.p.y;
+  const c = Math.cos(-drag.yaw), s = Math.sin(-drag.yaw);
+  drag.gx = dx * c - dy * s;
+  drag.gy = dx * s + dy * c;
+}
+
+function grabNearEdge() {
+  return Math.abs(drag.gx) > CARD_W / 2 - EDGE_BAND ||
+         Math.abs(drag.gy) > CARD_H / 2 - EDGE_BAND;
+}
+
+table.addEventListener('pointerdown', e => {
+  const el = e.target.closest('.card');
+  if (!el || drag) return;
+  const card = el.__card;
+  e.preventDefault();
+  table.setPointerCapture(e.pointerId);
+
+  // Catch it wherever it is and hold it flat.
+  card.settleFlat();
+  card.held = true;
+  card.goal = null;
+  card.el.classList.add('held');
+  card.wake();
+  bringToTop(card);
+
+  const now = performance.now();
+  drag = {
+    card, id: e.pointerId, mode: 'flat',
+    yaw: card.yaw, faceDown: !card.faceUp, omega: 0,
+    gx: 0, gy: 0,
+    px: e.clientX, py: e.clientY,
+    startT: now, moved: 0,
+    samples: [{ x: e.clientX, y: e.clientY, t: now }],
+    lastVx: 0, lastVy: 0,
+    tilt: null,
+  };
+  setGrab(card, e.clientX, e.clientY);
+});
+
+table.addEventListener('pointermove', e => {
+  if (!drag || e.pointerId !== drag.id) return;
+  drag.moved += Math.hypot(e.clientX - drag.px, e.clientY - drag.py);
+  drag.px = e.clientX; drag.py = e.clientY;
+  const now = performance.now();
+  drag.samples.push({ x: e.clientX, y: e.clientY, t: now });
+  if (drag.samples.length > 12) drag.samples.shift();
+  if (drag.mode === 'flat') maybeStartTilt(now);
+});
+
+function maybeStartTilt(now) {
+  if (!grabNearEdge()) return;
+  const { card, samples } = drag;
+  let i = samples.length - 1;
+  while (i > 0 && now - samples[i - 1].t < 40) i--;
+  const a = samples[i], b = samples[samples.length - 1];
+  const mx = b.x - a.x, my = b.y - a.y;
+  const m = Math.hypot(mx, my);
+  if (m < 4) return;
+  const ux = mx / m, uy = my / m;
+  const ix = card.p.x - drag.px, iy = card.p.y - drag.py;
+  const il = Math.hypot(ix, iy);
+  if (il < 8) return;
+  if ((ux * ix + uy * iy) / il < INWARD_COS) return;
+  startTilt(ux, uy);
+}
+
+function startTilt(ux, uy) {
+  const { card } = drag;
+  const { e, tx, ty } = card.support(ux, uy);
+  const c = Math.cos(-drag.yaw), s = Math.sin(-drag.yaw);
+  const ulx = ux * c - uy * s, uly = ux * s + uy * c;
+  const d = e - (drag.gx * ulx + drag.gy * uly);   // grab point to hinge
+  if (d < 24) return;
+  const Px = card.p.x + e * ux, Py = card.p.y + e * uy;
+  const w0 = (drag.px - Px) * tx + (drag.py - Py) * ty;
+  drag.mode = 'tilt';
+  drag.omega = 0;
+  drag.tilt = { ux, uy, tx, ty, e, d, Px, Py, w0,
+                q0: flatQuat(drag.yaw, drag.faceDown), theta: 0, thetaV: 0 };
+}
+
+function endTilt(flipped) {
+  const { card, tilt: T } = drag;
+  if (flipped) {
+    // Turned over about the hinge: the rectangle's yaw is reflected.
+    const beta = Math.atan2(T.ty, T.tx);
+    drag.yaw = wrapAngle(2 * beta - drag.yaw);
+    drag.faceDown = !drag.faceDown;
+  }
+  card.setPose(card.p.x, card.p.y, 0, flatQuat(drag.yaw, drag.faceDown));
+  drag.mode = 'flat';
+  drag.tilt = null;
+  setGrab(card, drag.px, drag.py);
+}
+
+function stepTilt(dt) {
+  const { card, tilt: T } = drag;
+  const w = (drag.px - T.Px) * T.tx + (drag.py - T.Py) * T.ty;
+  T.Px += (w - T.w0) * T.tx; T.Py += (w - T.w0) * T.ty;
+  const s = (drag.px - T.Px) * T.ux + (drag.py - T.Py) * T.uy;
+  let theta;
+  if (s <= -T.d) {
+    T.Px += (s + T.d) * T.ux; T.Py += (s + T.d) * T.uy; theta = 0;
+  } else if (s >= T.d) {
+    T.Px += (s - T.d) * T.ux; T.Py += (s - T.d) * T.uy; theta = Math.PI;
+  } else {
+    theta = Math.acos(-s / T.d);
+  }
+  const rate = (theta - T.theta) / Math.max(dt, 1e-4);
+  T.thetaV = T.thetaV * 0.6 + rate * 0.4;
+  T.theta = theta;
+
+  const b = bounds();
+  const x = clamp(T.Px - T.e * Math.cos(theta) * T.ux, b.x0, b.x1);
+  const y = clamp(T.Py - T.e * Math.cos(theta) * T.uy, b.y0, b.y1);
+  card.setPose(x, y, T.e * Math.sin(theta), qmul(qaxis(T.tx, T.ty, 0, theta), T.q0));
+
+  if (theta === 0) endTilt(false);
+  else if (theta === Math.PI) endTilt(true);
+  card.render();
+}
+
+function stepFlat(dt) {
+  const { card } = drag;
+  const now = performance.now();
+  const { vx: pvx, vy: pvy } = pointerVelocity(drag.samples, now);
+
+  const c = Math.cos(drag.yaw), s = Math.sin(drag.yaw);
+  const rx = -(drag.gx * c - drag.gy * s);          // grab point -> centre
+  const ry = -(drag.gx * s + drag.gy * c);
+  const vcx = pvx - drag.omega * ry;
+  const vcy = pvy + drag.omega * rx;
+  const fx = -GRAB_FRICTION * vcx, fy = -GRAB_FRICTION * vcy;
+  const torque = rx * fy - ry * fx;
+  drag.omega += (torque / IZZ) * dt;
+  drag.omega *= Math.exp(-0.8 * dt);
+  drag.yaw += drag.omega * dt;
+
+  const c2 = Math.cos(drag.yaw), s2 = Math.sin(drag.yaw);
+  const b = bounds();
+  const x = clamp(drag.px - (drag.gx * c2 - drag.gy * s2), b.x0, b.x1);
+  const y = clamp(drag.py - (drag.gx * s2 + drag.gy * c2), b.y0, b.y1);
+  card.setPose(x, y, 0, flatQuat(drag.yaw, drag.faceDown));
+  drag.lastVx = vcx; drag.lastVy = vcy;
+  card.render();
+}
+
+function stepDrag(dt) {
+  if (!drag) return;
+  if (drag.mode === 'tilt') stepTilt(dt); else stepFlat(dt);
+}
+
+function endDrag(e) {
+  if (!drag || e.pointerId !== drag.id) return;
+  const { card } = drag;
+  const now = performance.now();
+  card.held = false;
+  card.el.classList.remove('held');
+  card.wake();
+
+  if (drag.mode === 'tilt') {
+    // Hand the hinge motion to the body: it keeps turning about the hinge,
+    // and gravity decides whether it falls back or over.
+    const T = drag.tilt;
+    const { vx: pvx, vy: pvy } = pointerVelocity(drag.samples, now);
+    const across = pvx * T.tx + pvy * T.ty;
+    const thetaV = clamp(T.thetaV, -25, 25);
+    const sn = Math.sin(T.theta), cs = Math.cos(T.theta);
+    card.v = {
+      x: across * T.tx + T.e * sn * thetaV * T.ux,
+      y: across * T.ty + T.e * sn * thetaV * T.uy,
+      z: clamp(T.e * cs * thetaV, -MAX_VZ, MAX_VZ),
+    };
+    card.w = { x: T.tx * thetaV, y: T.ty * thetaV, z: 0 };
+  } else {
+    const quickTap = drag.moved < 6 && now - drag.startT < 300;
+    if (quickTap) {
+      card.v = { x: 0, y: 0, z: 0 }; card.w = { x: 0, y: 0, z: 0 };
+      card.flipFrom(e.clientX, e.clientY);
+    } else {
+      card.v = { x: drag.lastVx, y: drag.lastVy, z: 0 };
+      card.w = { x: 0, y: 0, z: drag.omega };
+      const sp = Math.hypot(card.v.x, card.v.y);
+      if (sp > LIFT_SPEED) {
+        // A flat fling skims off the felt with a little wobble.
+        card.v.z = Math.min(90 + (sp - LIFT_SPEED) * 0.25, MAX_VZ);
+        const ax = -card.v.y / sp, ay = card.v.x / sp;
+        const wob = rand(-2.5, 2.5);
+        card.w.x += ax * wob; card.w.y += ay * wob;
+        card.v.z = Math.max(card.v.z, 80 * Math.abs(wob));
+      }
+    }
+  }
+  drag = null;
+}
+table.addEventListener('pointerup', endDrag);
+table.addEventListener('pointercancel', endDrag);
+
+// ===========================================================================
+// Buttons
+// ===========================================================================
+function gather(shuffle = false) {
+  if (shuffle) {
+    for (let i = cards.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [cards[i], cards[j]] = [cards[j], cards[i]];
+    }
+    cards.forEach((c, k) => { c.order = k; c.render(); });
+  }
+  const cx = innerWidth / 2, cy = innerHeight / 2;
+  cards.forEach((c, i) => {
+    if (c.held) return;
+    setTimeout(() => {
+      if (c.held) return;
+      c.slideTo(cx + rand(-3, 3), cy + rand(-3, 3), rand(-0.05, 0.05), false);
+    }, i * 12);
+  });
+}
+
+function scatter() {
+  cards.forEach((c, i) => {
+    if (c.held) return;
+    setTimeout(() => {
+      if (c.held || !c.flat) return;
+      c.goal = null;
+      // Flick it up off one edge (a hinge, so no corner digs into the felt),
+      // then send it sliding and spinning.
+      const a = rand(0, TAU);
+      c.flipFrom(c.p.x - Math.cos(a) * 70, c.p.y - Math.sin(a) * 70, rand(1.1, 1.9));
+      const dir = rand(0, TAU), sp = rand(400, 1100);
+      c.v.x += Math.cos(dir) * sp; c.v.y += Math.sin(dir) * sp;
+      c.w.z += rand(-8, 8);
+    }, i * 15);
+  });
+}
+
+function flipAll() {
+  cards.forEach((c, i) => {
+    if (c.held) return;
+    setTimeout(() => { if (!c.held && c.flat) c.flipToss(); }, i * 10);
+  });
+}
+
+function deal() {
+  const top = cards.slice(-5).reverse();
+  const y = innerHeight - 200;
+  top.forEach((c, i) => {
+    if (c.held) return;
+    const tx = innerWidth / 2 + (i - 2) * 130;
+    setTimeout(() => { if (!c.held) c.slideTo(tx, y, rand(-0.12, 0.12), true); }, i * 140);
+  });
+}
+
+document.getElementById('btn-gather').onclick = () => gather(false);
+document.getElementById('btn-shuffle').onclick = () => gather(true);
+document.getElementById('btn-scatter').onclick = scatter;
+document.getElementById('btn-flipall').onclick = flipAll;
+document.getElementById('btn-deal').onclick = deal;
+
+// ===========================================================================
+// Main loop
+// ===========================================================================
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, 1 / 30);
+  last = now;
+  stepDrag(dt);
+  const b = bounds();
+  const n = Math.max(1, Math.ceil(dt / SUBSTEP));
+  const h = dt / n;
+  for (let k = 0; k < n; k++) for (const c of cards) c.step(h, b, now);
+  for (const c of cards) if (!c.asleep && !c.held) c.render();
+  requestAnimationFrame(frame);
+}
+
+makeDeck();
+stackAt(innerWidth * 0.5, innerHeight * 0.5);
+addEventListener('resize', () => cards.forEach(c => c.wake()));
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
