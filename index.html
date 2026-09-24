@@ -47,20 +47,39 @@
   }
   #veil.gone { opacity: 0; }
   .card.held { cursor: grabbing; }
+  /* The faces are painted once and only ever moved by the compositor: nothing
+     here may change per frame, or every airborne card re-rasterises each
+     frame (ruinous on a 3x phone screen). The contact shadow is static; the
+     height-dependent shadow is a separate flat element on the felt. */
   .card .face, .card .back {
     position: absolute; inset: 0;
     border-radius: 7px;
     backface-visibility: hidden;
     -webkit-backface-visibility: hidden;
-    box-shadow: var(--sh, 1px 2px 4px rgba(0,0,0,.35));
+    box-shadow: 1px 2px 4px rgba(0,0,0,.35);
     background: #fdfcf8;
-    overflow: hidden;
   }
   .card .back { transform: rotateX(180deg); }
   .card img {
     display: block; width: 100%; height: 100%;
     pointer-events: none; -webkit-user-drag: none;
   }
+  /* Ground shadow of a card in the air. Painted once (a soft dark rectangle);
+     per frame only its transform and opacity change, which the compositor
+     handles without repainting. Only exists while its card is awake. */
+  .shadow {
+    position: absolute; left: 0; top: 0;
+    width: var(--card-w); height: var(--card-h);
+    border-radius: 9px;
+    background: rgba(0,0,0,.30);
+    box-shadow: 0 0 10px 5px rgba(0,0,0,.30);
+    opacity: 0;
+    pointer-events: none;
+    will-change: transform, opacity;
+    z-index: 999;              /* over resting cards, under airborne ones */
+    display: none;
+  }
+  .shadow.on { display: block; }
   #ui {
     position: fixed; z-index: 100000;
     left: max(24px, env(safe-area-inset-left));
@@ -70,8 +89,13 @@
     display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
     padding: 8px 10px; border-radius: 10px;
     background: rgba(0,0,0,.45); color: #f1e9d6;
-    backdrop-filter: blur(6px);
     touch-action: manipulation;
+  }
+  /* Backdrop blur re-samples everything under the menu every frame something
+     moves; fine on a laptop, a steady GPU tax on a phone. Keep it for wide
+     screens only. */
+  @media (min-width: 641px) {
+    #ui { backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
   }
   #ui button {
     font: inherit; padding: 6px 12px; border-radius: 6px; cursor: pointer;
@@ -86,6 +110,7 @@
       top: max(10px, env(safe-area-inset-top));
       max-width: none; gap: 6px; padding: 6px 8px;
       justify-content: center;
+      background: rgba(0,0,0,.6);
     }
     #ui button { padding: 8px 10px; flex: 1 1 auto; }
   }
@@ -171,38 +196,46 @@ function qnorm(q) {
   q.w /= l; q.x /= l; q.y /= l; q.z /= l;
   return q;
 }
-// Row-major 3x3 rotation matrix.
-function qmat(q) {
+// Row-major 3x3 rotation matrix, written into R (no allocation: this runs
+// for every card on every substep).
+function qmatInto(q, R) {
   const { w, x, y, z } = q;
-  return [
-    1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w),
-    2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w),
-    2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y),
-  ];
+  R[0] = 1 - 2 * (y * y + z * z); R[1] = 2 * (x * y - z * w); R[2] = 2 * (x * z + y * w);
+  R[3] = 2 * (x * y + z * w); R[4] = 1 - 2 * (x * x + z * z); R[5] = 2 * (y * z - x * w);
+  R[6] = 2 * (x * z - y * w); R[7] = 2 * (y * z + x * w); R[8] = 1 - 2 * (x * x + y * y);
+  return R;
 }
-const mulR = (R, v) => ({
-  x: R[0] * v.x + R[1] * v.y + R[2] * v.z,
-  y: R[3] * v.x + R[4] * v.y + R[5] * v.z,
-  z: R[6] * v.x + R[7] * v.y + R[8] * v.z,
-});
 const mulRT = (R, v) => ({
   x: R[0] * v.x + R[3] * v.y + R[6] * v.z,
   y: R[1] * v.x + R[4] * v.y + R[7] * v.z,
   z: R[2] * v.x + R[5] * v.y + R[8] * v.z,
 });
-const cross = (a, b) => ({
-  x: a.y * b.z - a.z * b.y,
-  y: a.z * b.x - a.x * b.z,
-  z: a.x * b.y - a.y * b.x,
-});
 // Flat pose on the felt: yaw about z, optionally turned face down.
 const flatQuat = (yaw, faceDown) =>
   qmul(qaxis(0, 0, 1, yaw), faceDown ? qaxis(1, 0, 0, Math.PI) : Q1);
 
-const CORNERS = [
-  { x: -CARD_W / 2, y: -CARD_H / 2, z: 0 }, { x: CARD_W / 2, y: -CARD_H / 2, z: 0 },
-  { x: CARD_W / 2, y: CARD_H / 2, z: 0 }, { x: -CARD_W / 2, y: CARD_H / 2, z: 0 },
-];
+// Corner offsets in the body frame (z = 0).
+const CORNER_X = [-CARD_W / 2, CARD_W / 2, CARD_W / 2, -CARD_W / 2];
+const CORNER_Y = [-CARD_H / 2, -CARD_H / 2, CARD_H / 2, CARD_H / 2];
+
+// Apparent mass of the body point r (world frame) when pushed along the unit
+// direction d: rd = R^T (r x d), then 1 / (1/m + sum rd_i^2 / I_i).
+function effMass(R, rx, ry, rz, dx, dy, dz) {
+  const cx = ry * dz - rz * dy, cy = rz * dx - rx * dz, cz = rx * dy - ry * dx;
+  const bx = R[0] * cx + R[3] * cy + R[6] * cz;
+  const by = R[1] * cx + R[4] * cy + R[7] * cz;
+  const bz = R[2] * cx + R[5] * cy + R[8] * cz;
+  return 1 / (1 / MASS + bx * bx / IXX + by * by / IYY + bz * bz / IZZ);
+}
+// Rail force on a corner penetrating by pen with velocity vel into the rail
+// whose normal is d. Damping is impulse-limited (can stop, never reverse).
+function wallForce(R, rx, ry, rz, pen, vel, dx, dy, dz, h) {
+  if (pen <= 0) return 0;
+  const m = effMass(R, rx, ry, rz, dx, dy, dz);
+  return Math.max(0, K_WALL * pen - Math.sign(vel) * Math.min(B_WALL * Math.abs(vel), m * Math.abs(vel) / h));
+}
+// Force/torque accumulator shared by step() and steer().
+const ACC = { fx: 0, fy: 0, fz: 0, tx: 0, ty: 0, tz: 0 };
 
 // On narrow screens the menu spans the top, so the felt starts below it.
 let topPad = EDGE_PAD;
@@ -210,9 +243,11 @@ function measureTop() {
   const ui = document.getElementById('ui').getBoundingClientRect();
   topPad = innerWidth <= 640 ? ui.bottom + EDGE_PAD : EDGE_PAD;
 }
+const BOUNDS = { x0: 0, y0: 0, x1: 0, y1: 0 };
 function bounds() {
-  return { x0: EDGE_PAD, y0: topPad,
-           x1: innerWidth - EDGE_PAD, y1: innerHeight - EDGE_PAD };
+  BOUNDS.x0 = EDGE_PAD; BOUNDS.y0 = topPad;
+  BOUNDS.x1 = innerWidth - EDGE_PAD; BOUNDS.y1 = innerHeight - EDGE_PAD;
+  return BOUNDS;
 }
 
 // ===========================================================================
@@ -225,20 +260,26 @@ class Card {
     this.q = { ...Q1 };                   // orientation (body -> world)
     this.v = { x: 0, y: 0, z: 0 };
     this.w = { x: 0, y: 0, z: 0 };        // angular velocity, world frame
-    this.R = qmat(this.q);
+    this.R = qmatInto(this.q, new Float64Array(9));
     this.held = false;
     this.asleep = false;
     this.restTime = 0;
     this.goal = null;
     this.order = 0;
+    this._zi = -1;
+    this._shOn = false;
+    this._shOp = '';
 
     const el = document.createElement('div');
     el.className = 'card';
     el.innerHTML =
-      `<div class="face"><img src="${faceSrc}" alt="${name}"></div>` +
-      `<div class="back"><img src="deck/back.svg" alt="back"></div>`;
+      `<div class="face"><img src="${faceSrc}" alt="${name}" decoding="async" draggable="false"></div>` +
+      `<div class="back"><img src="deck/back.svg" alt="back" decoding="async" draggable="false"></div>`;
     this.el = el;
     el.__card = this;
+    const sh = document.createElement('div');
+    sh.className = 'shadow';
+    this.sh = sh;
   }
 
   get faceUp() { return this.R[8] > 0; }
@@ -247,12 +288,16 @@ class Card {
   get speed() { return Math.hypot(this.v.x, this.v.y, this.v.z); }
   get inAir() { return this.p.z > 2 || Math.abs(this.R[8]) < 0.98; }
 
-  wake() { this.asleep = false; this.restTime = 0; }
+  wake() {
+    this.asleep = false; this.restTime = 0;
+    if (!this._shOn) { this._shOn = true; this.sh.classList.add('on'); }
+    kick();
+  }
 
   setPose(x, y, z, q) {
     this.p.x = x; this.p.y = y; this.p.z = z;
     this.q = qnorm({ ...q });
-    this.R = qmat(this.q);
+    qmatInto(this.q, this.R);
   }
 
   // Drop the card flat on the felt at its current yaw and facing.
@@ -262,7 +307,13 @@ class Card {
     this.w = { x: 0, y: 0, z: 0 };
   }
 
-  sleep() { this.settleFlat(); this.asleep = true; this.render(); }
+  sleep() {
+    this.settleFlat();
+    this.asleep = true;
+    this.render();
+    // A resting card's shadow layer would be pure GPU memory: drop it.
+    if (this._shOn) { this._shOn = false; this._shOp = ''; this.sh.classList.remove('on'); }
+  }
 
   // Supporting line of the rectangle in world direction u: distance from the
   // centre, and the hinge direction t. Touches an edge or a corner.
@@ -307,91 +358,99 @@ class Card {
   }
 
   // --- Physics ------------------------------------------------------------
+  // Written with scalars throughout: this runs 54 cards x ~12 substeps per
+  // frame, and per-substep object allocation was the main JS cost.
   step(h, b, now) {
     if (this.asleep || this.held) return;
-    const R = this.R = qmat(this.q);
-    const p = this.p, v = this.v, w = this.w;
-    const F = { x: 0, y: 0, z: -MASS * GRAVITY };
-    const T = { x: 0, y: 0, z: 0 };
+    const R = qmatInto(this.q, this.R);
+    const p = this.p, v = this.v, w = this.w, A = ACC;
+    A.fx = 0; A.fy = 0; A.fz = -MASS * GRAVITY;
+    A.tx = 0; A.ty = 0; A.tz = 0;
 
     // Air: a card cuts through air edge-on but is pushed back face-on.
-    const n = { x: R[2], y: R[5], z: R[8] };
-    const vn = v.x * n.x + v.y * n.y + v.z * n.z;
-    F.x -= MASS * (AIR_PAR * (v.x - vn * n.x) + AIR_PERP * vn * n.x);
-    F.y -= MASS * (AIR_PAR * (v.y - vn * n.y) + AIR_PERP * vn * n.y);
-    F.z -= MASS * (AIR_PAR * (v.z - vn * n.z) + AIR_PERP * vn * n.z);
+    const nx = R[2], ny = R[5], nz = R[8];
+    const vn = v.x * nx + v.y * ny + v.z * nz;
+    A.fx -= MASS * (AIR_PAR * (v.x - vn * nx) + AIR_PERP * vn * nx);
+    A.fy -= MASS * (AIR_PAR * (v.y - vn * ny) + AIR_PERP * vn * ny);
+    A.fz -= MASS * (AIR_PAR * (v.z - vn * nz) + AIR_PERP * vn * nz);
 
     // Corner contacts with the felt and the rails. Damping and friction are
     // impulse-limited: within one substep they can stop a corner but never
     // reverse it, which keeps stiff contacts stable.
     const mu = this.goal ? MU_STEER : MU_FELT;
     let touching = 0;
-    const effMass = (r, d) => {          // apparent mass of point r along d
-      const rd = mulRT(R, cross(r, d));
-      return 1 / (1 / MASS + rd.x * rd.x / IXX + rd.y * rd.y / IYY + rd.z * rd.z / IZZ);
-    };
-    for (const rc of CORNERS) {
-      const r = mulR(R, rc);
-      const cx = p.x + r.x, cy = p.y + r.y, cz = p.z + r.z;
-      const wr = cross(w, r);
-      const cvx = v.x + wr.x, cvy = v.y + wr.y, cvz = v.z + wr.z;
+    for (let i = 0; i < 4; i++) {
+      const bx = CORNER_X[i], by = CORNER_Y[i];
+      const rx = R[0] * bx + R[1] * by;                 // r = R * corner
+      const ry = R[3] * bx + R[4] * by;
+      const rz = R[6] * bx + R[7] * by;
+      const cx = p.x + rx, cy = p.y + ry, cz = p.z + rz;
+      const cvx = v.x + (w.y * rz - w.z * ry);           // v + w x r
+      const cvy = v.y + (w.z * rx - w.x * rz);
+      const cvz = v.z + (w.x * ry - w.y * rx);
       let fx = 0, fy = 0, fz = 0;
       if (cz < 0) {
         touching++;
-        const mz = effMass(r, { x: 0, y: 0, z: 1 });
+        const mz = effMass(R, rx, ry, rz, 0, 0, 1);
         let fn = K_CONTACT * -cz - Math.sign(cvz) * Math.min(B_CONTACT * Math.abs(cvz), mz * Math.abs(cvz) / h);
         if (fn < 0) fn = 0;
         const vt = Math.hypot(cvx, cvy);
         if (vt > 1e-6) {
           const dx = cvx / vt, dy = cvy / vt;
-          const mt = effMass(r, { x: dx, y: dy, z: 0 });
+          const mt = effMass(R, rx, ry, rz, dx, dy, 0);
           const ft = Math.min(mu * fn, mt * vt / h);
           fx -= dx * ft; fy -= dy * ft;
         }
         fz += fn;
       }
-      const wallForce = (pen, vel, d) => {
-        if (pen <= 0) return 0;
-        const m = effMass(r, d);
-        return Math.max(0, K_WALL * pen - Math.sign(vel) * Math.min(B_WALL * Math.abs(vel), m * Math.abs(vel) / h));
-      };
-      if (cx < b.x0) fx += wallForce(b.x0 - cx, cvx, { x: 1, y: 0, z: 0 });
-      if (cx > b.x1) fx -= wallForce(cx - b.x1, -cvx, { x: 1, y: 0, z: 0 });
-      if (cy < b.y0) fy += wallForce(b.y0 - cy, cvy, { x: 0, y: 1, z: 0 });
-      if (cy > b.y1) fy -= wallForce(cy - b.y1, -cvy, { x: 0, y: 1, z: 0 });
+      if (cx < b.x0) fx += wallForce(R, rx, ry, rz, b.x0 - cx, cvx, 1, 0, 0, h);
+      if (cx > b.x1) fx -= wallForce(R, rx, ry, rz, cx - b.x1, -cvx, 1, 0, 0, h);
+      if (cy < b.y0) fy += wallForce(R, rx, ry, rz, b.y0 - cy, cvy, 0, 1, 0, h);
+      if (cy > b.y1) fy -= wallForce(R, rx, ry, rz, cy - b.y1, -cvy, 0, 1, 0, h);
       if (fx || fy || fz) {
-        F.x += fx; F.y += fy; F.z += fz;
-        const tq = cross(r, { x: fx, y: fy, z: fz });
-        T.x += tq.x; T.y += tq.y; T.z += tq.z;
+        A.fx += fx; A.fy += fy; A.fz += fz;
+        A.tx += ry * fz - rz * fy;                        // r x f
+        A.ty += rz * fx - rx * fz;
+        A.tz += rx * fy - ry * fx;
       }
     }
 
     // Scripted moves steer toward a goal once the card is flat on the felt.
-    if (this.goal && this.flat) this.steer(F, T, now);
+    if (this.goal && this.flat) this.steer(now);
     if (this.asleep) return;
 
     // Linear
-    v.x += F.x / MASS * h; v.y += F.y / MASS * h; v.z += F.z / MASS * h;
+    v.x += A.fx / MASS * h; v.y += A.fy / MASS * h; v.z += A.fz / MASS * h;
 
     // Angular, in the body frame (diagonal inertia, gyroscopic term kept).
-    const wb = mulRT(R, w), tb = mulRT(R, T);
-    const Lx = IXX * wb.x, Ly = IYY * wb.y, Lz = IZZ * wb.z;
-    tb.x -= wb.y * Lz - wb.z * Ly + AIR_TUMBLE * Lx;
-    tb.y -= wb.z * Lx - wb.x * Lz + AIR_TUMBLE * Ly;
-    tb.z -= wb.x * Ly - wb.y * Lx + AIR_SPIN * Lz;
-    wb.x += tb.x / IXX * h; wb.y += tb.y / IYY * h; wb.z += tb.z / IZZ * h;
-    const nw = mulR(R, wb);
-    const wl = Math.hypot(nw.x, nw.y, nw.z);
+    let wbx = R[0] * w.x + R[3] * w.y + R[6] * w.z;      // R^T w
+    let wby = R[1] * w.x + R[4] * w.y + R[7] * w.z;
+    let wbz = R[2] * w.x + R[5] * w.y + R[8] * w.z;
+    let tbx = R[0] * A.tx + R[3] * A.ty + R[6] * A.tz;   // R^T T
+    let tby = R[1] * A.tx + R[4] * A.ty + R[7] * A.tz;
+    let tbz = R[2] * A.tx + R[5] * A.ty + R[8] * A.tz;
+    const Lx = IXX * wbx, Ly = IYY * wby, Lz = IZZ * wbz;
+    tbx -= wby * Lz - wbz * Ly + AIR_TUMBLE * Lx;
+    tby -= wbz * Lx - wbx * Lz + AIR_TUMBLE * Ly;
+    tbz -= wbx * Ly - wby * Lx + AIR_SPIN * Lz;
+    wbx += tbx / IXX * h; wby += tby / IYY * h; wbz += tbz / IZZ * h;
+    const nwx = R[0] * wbx + R[1] * wby + R[2] * wbz;    // R wb
+    const nwy = R[3] * wbx + R[4] * wby + R[5] * wbz;
+    const nwz = R[6] * wbx + R[7] * wby + R[8] * wbz;
+    const wl = Math.hypot(nwx, nwy, nwz);
     const ws = wl > MAX_OMEGA ? MAX_OMEGA / wl : 1;
-    w.x = nw.x * ws; w.y = nw.y * ws; w.z = nw.z * ws;
+    w.x = nwx * ws; w.y = nwy * ws; w.z = nwz * ws;
 
     // Integrate
     p.x += v.x * h; p.y += v.y * h; p.z += v.z * h;
     if (p.z > MAX_Z) { p.z = MAX_Z; if (v.z > 0) v.z = 0; }
-    const q = this.q;
-    const dq = qmul({ w: 0, x: w.x, y: w.y, z: w.z }, q);
-    q.w += 0.5 * dq.w * h; q.x += 0.5 * dq.x * h;
-    q.y += 0.5 * dq.y * h; q.z += 0.5 * dq.z * h;
+    const q = this.q;                                    // dq = (0, w) * q
+    const dw = -w.x * q.x - w.y * q.y - w.z * q.z;
+    const dx = w.x * q.w + w.y * q.z - w.z * q.y;
+    const dy = w.y * q.w - w.x * q.z + w.z * q.x;
+    const dz = w.z * q.w + w.x * q.y - w.y * q.x;
+    q.w += 0.5 * dw * h; q.x += 0.5 * dx * h;
+    q.y += 0.5 * dy * h; q.z += 0.5 * dz * h;
     qnorm(q);
 
     // Rest detection: flat, touching, still.
@@ -404,7 +463,7 @@ class Card {
     }
   }
 
-  steer(F, T, now) {
+  steer(now) {
     const g = this.goal;
     if (g.face !== undefined && g.face !== this.faceUp) {
       // Wrong way up: flip it over, then keep steering after it lands.
@@ -416,10 +475,10 @@ class Card {
     }
     const K = 400, D = 40;
     const dx = g.x - this.p.x, dy = g.y - this.p.y;
-    F.x += K * dx - D * this.v.x;
-    F.y += K * dy - D * this.v.y;
+    ACC.fx += K * dx - D * this.v.x;
+    ACC.fy += K * dy - D * this.v.y;
     const da = wrapAngle(g.yaw - this.yaw);
-    T.z += IZZ * (350 * da - 30 * this.w.z);
+    ACC.tz += IZZ * (350 * da - 30 * this.w.z);
     if (Math.hypot(dx, dy) < 3 && Math.abs(da) < 0.06 &&
         this.speed < 25 && Math.abs(this.w.z) < 0.5) {
       this.setPose(g.x, g.y, 0, flatQuat(g.yaw, !this.faceUp));
@@ -429,18 +488,35 @@ class Card {
   }
 
   // --- Rendering ----------------------------------------------------------
+  // Only transform, opacity and z-index ever change here, so a frame costs
+  // the compositor a re-draw and nothing more.
   render() {
     const R = this.R, p = this.p;
+    const x = p.x - CARD_W / 2, y = p.y - CARD_H / 2, z = p.z;
     this.el.style.transform =
-      `translate3d(${(p.x - CARD_W / 2).toFixed(2)}px, ${(p.y - CARD_H / 2).toFixed(2)}px, ${p.z.toFixed(2)}px) ` +
+      `translate3d(${x.toFixed(2)}px, ${y.toFixed(2)}px, ${z.toFixed(2)}px) ` +
       `matrix3d(${R[0].toFixed(5)},${R[3].toFixed(5)},${R[6].toFixed(5)},0,` +
       `${R[1].toFixed(5)},${R[4].toFixed(5)},${R[7].toFixed(5)},0,` +
       `${R[2].toFixed(5)},${R[5].toFixed(5)},${R[8].toFixed(5)},0,0,0,0,1)`;
-    const z = p.z;
-    const alpha = clamp(0.38 - z * 0.0006, 0.12, 0.38);
-    this.el.style.setProperty('--sh',
-      `${(1 + z * 0.32).toFixed(1)}px ${(2 + z * 0.42).toFixed(1)}px ` +
-      `${(4 + z * 0.35).toFixed(1)}px rgba(0,0,0,${alpha.toFixed(3)})`);
+    this.updateZ();
+    if (this._shOn) {
+      // Shadow on the felt: the card's footprint (the in-plane part of R),
+      // cast a little down-right, fading in as it lifts and softening with
+      // height. Nothing to draw while it lies flat.
+      const op = z < 1 ? 0 : Math.min(z / 40, 1) * Math.max(0.45, 1 - z / 700);
+      const ops = op.toFixed(3);
+      if (ops !== this._shOp) { this.sh.style.opacity = ops; this._shOp = ops; }
+      if (op > 0) {
+        const s = 1 + z * 0.0012;
+        this.sh.style.transform =
+          `translate(${(x + z * 0.32).toFixed(2)}px, ${(y + z * 0.42).toFixed(2)}px) ` +
+          `matrix(${(R[0] * s).toFixed(5)},${(R[3] * s).toFixed(5)},` +
+          `${(R[1] * s).toFixed(5)},${(R[4] * s).toFixed(5)},0,0)`;
+      }
+    }
+  }
+
+  updateZ() {
     const zi = (this.inAir || this.held) ? 1000 + this.order : this.order;
     if (this._zi !== zi) { this.el.style.zIndex = zi; this._zi = zi; }
   }
@@ -456,13 +532,16 @@ function makeDeck() {
   for (const s of SUITS) for (const r of RANKS) cards.push(new Card(r + s, `deck/${r}${s}.svg`));
   cards.push(new Card('JOKER_R', 'deck/joker_red.svg'));
   cards.push(new Card('JOKER_B', 'deck/joker_black.svg'));
+  // Shadows first so the browser's default paint order never puts one over
+  // a card of equal z-index.
+  cards.forEach(c => table.appendChild(c.sh));
   cards.forEach((c, i) => { c.order = i; table.appendChild(c.el); });
 }
 
 function bringToTop(card) {
   cards.splice(cards.indexOf(card), 1);
   cards.push(card);
-  cards.forEach((c, k) => { c.order = k; c.render(); });
+  cards.forEach((c, k) => { c.order = k; c.updateZ(); });
 }
 
 function stackAt(cx, cy, faceDown = true) {
@@ -471,8 +550,7 @@ function stackAt(cx, cy, faceDown = true) {
               flatQuat(rand(-0.03, 0.03), faceDown));
     c.v = { x: 0, y: 0, z: 0 }; c.w = { x: 0, y: 0, z: 0 };
     c.goal = null;
-    c.asleep = true;
-    c.render();
+    c.sleep();
   });
 }
 
@@ -722,7 +800,7 @@ function gather(shuffle = false) {
       const j = Math.floor(Math.random() * (i + 1));
       [cards[i], cards[j]] = [cards[j], cards[i]];
     }
-    cards.forEach((c, k) => { c.order = k; c.render(); });
+    cards.forEach((c, k) => { c.order = k; c.updateZ(); });
   }
   const cx = innerWidth / 2, cy = (topPad + innerHeight) / 2;
   cards.forEach((c, i) => {
@@ -777,17 +855,32 @@ document.getElementById('btn-deal').onclick = deal;
 // ===========================================================================
 // Main loop
 // ===========================================================================
+// The loop runs only while something is moving. Once every card is asleep
+// and nothing is held it stops, and the next wake() restarts it, so a resting
+// table costs the phone nothing.
 let last = performance.now();
+let running = false;
+function kick() {
+  if (running) return;
+  running = true;
+  last = performance.now();
+  requestAnimationFrame(frame);
+}
 function frame(now) {
-  const dt = Math.min((now - last) / 1000, 1 / 30);
+  const dt = Math.min(Math.max(now - last, 0) / 1000, 1 / 30);
   last = now;
   stepDrag(dt);
   const b = bounds();
   const n = Math.max(1, Math.ceil(dt / SUBSTEP));
   const h = dt / n;
   for (let k = 0; k < n; k++) for (const c of cards) c.step(h, b, now);
-  for (const c of cards) if (!c.asleep && !c.held) c.render();
-  requestAnimationFrame(frame);
+  let active = drag !== null;
+  for (const c of cards) {
+    if (c.asleep) continue;
+    active = true;
+    if (!c.held) c.render();
+  }
+  if (active) requestAnimationFrame(frame); else running = false;
 }
 
 makeDeck();
@@ -811,7 +904,7 @@ stackAt(innerWidth * 0.5, (topPad + innerHeight) * 0.5);
   });
 }
 addEventListener('resize', () => { measureTop(); cards.forEach(c => c.wake()); });
-requestAnimationFrame(frame);
+kick();
 </script>
 </body>
 </html>
