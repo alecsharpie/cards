@@ -76,10 +76,13 @@
     opacity: 0;
     pointer-events: none;
     will-change: transform, opacity;
-    z-index: 999;              /* over resting cards, under airborne ones */
     display: none;
   }
   .shadow.on { display: block; }
+  /* All the shadows in one layer, slotted between the cards lying on the
+     felt and the cards lifted off it, so a shadow darkens what it falls on
+     and never the card casting it. */
+  #shadows { position: absolute; inset: 0; pointer-events: none; }
   #ui {
     position: fixed; z-index: 100000;
     left: max(24px, env(safe-area-inset-left));
@@ -162,6 +165,14 @@ const EDGE_PAD = 34 * CARD_SCALE; // rail distance from the table edge
 const LIFT_SPEED = 650;          // release speed above which a flat fling lifts
 const MAX_VZ = 700;
 const MAX_Z = 220;
+// Paint order. Cards never collide with one another - they slide straight
+// through - so the only thing that makes an overlap read right is painting
+// them in height order. A card only overtakes another once it is this much
+// higher; without that margin two cards at the same height, or one settling
+// with a small bounce, trade places several times a second, and that is the
+// flicker you see as a scatter or a gather comes to rest.
+const PAINT_MARGIN = 6;          // px a card must gain before it overtakes
+const LIFT_H = 3;                // above this a card counts as lifted
 const GRAB_FRICTION = 22;        // felt drag on a card pulled flat by a point
 const NO_SPIN_ZONE = 0.5;        // grab inside this fraction of the half-size: no swing
 const EDGE_BAND = 36 * CARD_SCALE; // grab this close to an edge to lift it
@@ -265,8 +276,9 @@ class Card {
     this.asleep = false;
     this.restTime = 0;
     this.goal = null;
-    this.order = 0;
     this._zi = -1;
+    this.wx = 0; this.wy = 0;     // where it was when it last woke
+    this.lifted = false;          // has it left the felt since?
     this._shOn = false;
     this._shOp = '';
 
@@ -285,10 +297,17 @@ class Card {
   get faceUp() { return this.R[8] > 0; }
   get yaw() { return Math.atan2(this.R[3], this.R[0]); }
   get flat() { return Math.abs(this.R[8]) > 0.995 && this.p.z < 1.5; }
+  // Did it actually go somewhere since it woke? Only then has it earned a
+  // place on top of the pile.
+  get stirred() {
+    return this.lifted || Math.abs(this.p.x - this.wx) > 6 || Math.abs(this.p.y - this.wy) > 6;
+  }
   get speed() { return Math.hypot(this.v.x, this.v.y, this.v.z); }
-  get inAir() { return this.p.z > 2 || Math.abs(this.R[8]) < 0.98; }
 
   wake() {
+    // Remember where it set off from: a card that comes to rest without
+    // having really gone anywhere shouldn't climb to the top of the pile.
+    if (this.asleep) { this.wx = this.p.x; this.wy = this.p.y; this.lifted = false; }
     this.asleep = false; this.restTime = 0;
     if (!this._shOn) { this._shOn = true; this.sh.classList.add('on'); }
     kick();
@@ -444,6 +463,7 @@ class Card {
     // Integrate
     p.x += v.x * h; p.y += v.y * h; p.z += v.z * h;
     if (p.z > MAX_Z) { p.z = MAX_Z; if (v.z > 0) v.z = 0; }
+    if (p.z > LIFT_H) this.lifted = true;
     const q = this.q;                                    // dq = (0, w) * q
     const dw = -w.x * q.x - w.y * q.y - w.z * q.z;
     const dx = w.x * q.w + w.y * q.z - w.z * q.y;
@@ -457,7 +477,11 @@ class Card {
     const flatNow = Math.abs(R[8]) > 0.995;
     if (flatNow && touching >= 3 && this.speed < 4 && wl < 0.12) {
       this.restTime += h;
-      if (this.restTime > 0.12 && !this.goal) this.sleep();
+      if (this.restTime > 0.12 && !this.goal) {
+        const stirred = this.stirred;
+        this.sleep();
+        if (stirred) landed.push(this);
+      }
     } else {
       this.restTime = 0;
     }
@@ -483,7 +507,9 @@ class Card {
         this.speed < 25 && Math.abs(this.w.z) < 0.5) {
       this.setPose(g.x, g.y, 0, flatQuat(g.yaw, !this.faceUp));
       this.goal = null;
+      const stirred = this.stirred;
       this.sleep();
+      if (stirred) landed.push(this);
     }
   }
 
@@ -498,7 +524,6 @@ class Card {
       `matrix3d(${R[0].toFixed(5)},${R[3].toFixed(5)},${R[6].toFixed(5)},0,` +
       `${R[1].toFixed(5)},${R[4].toFixed(5)},${R[7].toFixed(5)},0,` +
       `${R[2].toFixed(5)},${R[5].toFixed(5)},${R[8].toFixed(5)},0,0,0,0,1)`;
-    this.updateZ();
     if (this._shOn) {
       // Shadow on the felt: the card's footprint (the in-plane part of R),
       // cast a little down-right, fading in as it lifts and softening with
@@ -516,8 +541,7 @@ class Card {
     }
   }
 
-  updateZ() {
-    const zi = (this.inAir || this.held) ? 1000 + this.order : this.order;
+  setZ(zi) {
     if (this._zi !== zi) { this.el.style.zIndex = zi; this._zi = zi; }
   }
 }
@@ -527,21 +551,47 @@ class Card {
 // ===========================================================================
 const table = document.getElementById('table');
 const cards = [];
+// Cards that came to rest this frame, collected here because settling
+// reorders the very array the physics loop is walking.
+const landed = [];
+
+const shadowLayer = document.createElement('div');
+shadowLayer.id = 'shadows';
+let shadowZ = -1;
 
 function makeDeck() {
   for (const s of SUITS) for (const r of RANKS) cards.push(new Card(r + s, `deck/${r}${s}.svg`));
   cards.push(new Card('JOKER_R', 'deck/joker_red.svg'));
   cards.push(new Card('JOKER_B', 'deck/joker_black.svg'));
-  // Shadows first so the browser's default paint order never puts one over
-  // a card of equal z-index.
-  cards.forEach(c => table.appendChild(c.sh));
-  cards.forEach((c, i) => { c.order = i; table.appendChild(c.el); });
+  table.appendChild(shadowLayer);
+  cards.forEach(c => shadowLayer.appendChild(c.sh));
+  cards.forEach(c => table.appendChild(c.el));
+}
+
+// Keep the deck sorted bottom-to-top by height and hand out the z-indices.
+// An insertion sort costs a single linear scan on an almost-sorted list,
+// and the margin means a card has to properly clear another to overtake it,
+// so nothing swaps back and forth while it settles. Cards at rest are all
+// at height 0 and hold their order, which is the pile order the buttons and
+// the deal read.
+function restack() {
+  for (let i = 1; i < cards.length; i++) {
+    const c = cards[i], z = c.p.z;
+    let j = i;
+    while (j > 0 && z < cards[j - 1].p.z - PAINT_MARGIN) { cards[j] = cards[j - 1]; j--; }
+    if (j !== i) cards[j] = c;
+  }
+  let lifted = 0;
+  while (lifted < cards.length && cards[lifted].p.z < LIFT_H) lifted++;
+  for (let i = 0; i < cards.length; i++) cards[i].setZ((i + 1) * 2);
+  const sz = lifted * 2 + 1;            // between the last card down and the first up
+  if (sz !== shadowZ) { shadowLayer.style.zIndex = sz; shadowZ = sz; }
 }
 
 function bringToTop(card) {
   cards.splice(cards.indexOf(card), 1);
   cards.push(card);
-  cards.forEach((c, k) => { c.order = k; c.updateZ(); });
+  restack();
 }
 
 function stackAt(cx, cy, faceDown = true) {
@@ -800,7 +850,7 @@ function gather(shuffle = false) {
       const j = Math.floor(Math.random() * (i + 1));
       [cards[i], cards[j]] = [cards[j], cards[i]];
     }
-    cards.forEach((c, k) => { c.order = k; c.updateZ(); });
+    restack();
   }
   const cx = innerWidth / 2, cy = (topPad + innerHeight) / 2;
   cards.forEach((c, i) => {
@@ -874,6 +924,15 @@ function frame(now) {
   const n = Math.max(1, Math.ceil(dt / SUBSTEP));
   const h = dt / n;
   for (let k = 0; k < n; k++) for (const c of cards) c.step(h, b, now);
+  // A card that has just come to rest lies on top of whatever it came down
+  // on, the way it would on a real table: push it to the top of the pile and
+  // let the sort drop it back under anything still in the air.
+  if (landed.length) {
+    for (const c of landed) { cards.splice(cards.indexOf(c), 1); cards.push(c); }
+    landed.length = 0;
+    if (drag) { cards.splice(cards.indexOf(drag.card), 1); cards.push(drag.card); }
+  }
+  restack();
   let active = drag !== null;
   for (const c of cards) {
     if (c.asleep) continue;
@@ -886,6 +945,7 @@ function frame(now) {
 makeDeck();
 measureTop();
 stackAt(innerWidth * 0.5, (topPad + innerHeight) * 0.5);
+restack();
 
 // Reveal the deck once every card image has decoded (or after a grace period,
 // so a slow file can never hold the whole table hostage).
